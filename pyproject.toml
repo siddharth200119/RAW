@@ -16,11 +16,6 @@ classifiers = [
     "Programming Language :: Python :: 3.14",
     "Operating System :: OS Independent",
 ]
-urls = {
-    "Homepage" = "https://github.com/siddharth200119/RAW",
-    "Repository" = "https://github.com/siddharth200119/RAW",
-    "Issues" = "https://github.com/siddharth200119/RAW/issues"
-}
 dependencies = [
     "httpx>=0.28.1",
     "jsonschema>=4.26.0",
@@ -28,6 +23,11 @@ dependencies = [
     "pydantic>=2.12.5",
     "numpy>=2.0.0",
 ]
+
+[project.urls]
+Homepage = "https://github.com/siddharth200119/RAW"
+Repository = "https://github.com/siddharth200119/RAW"
+Issues = "https://github.com/siddharth200119/RAW/issues"
 
 [build-system]
 requires = ["hatchling"]
