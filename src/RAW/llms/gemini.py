@@ -29,7 +29,7 @@ class GeminiLLM(BaseLLM):
     def __init__(
         self, 
         api_key: str, 
-        model: str = "gemini-3-flash-preview", 
+        model: str = "gemini-2.5-flash-lite", 
         options: Optional[GeminiOptions] = None,
         logger: Optional[Logger] = None
     ):

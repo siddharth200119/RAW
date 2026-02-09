@@ -1,187 +1,102 @@
-"""
-Example usage of GeminiLLM from RAW library
-"""
 import asyncio
 import os
-from RAW.llms.gemini import GeminiLLM, GeminiOptions
-from RAW.modals import Message, Tool, ToolCall, LLMCapability
+from RAW.agent import Agent
+from RAW.llms.gemini import GeminiLLM
+from RAW.modals import Tool
 from RAW.modals.tools import ToolParam
+from RAW.utils import Logger
 
+# Example tool
+async def get_weather(location: str):
+    """Get the weather for a location."""
+    # Mock weather data
+    return f"The weather in {location} is sunny with a temperature of 25°C."
 
-async def basic_generation_example():
-    """Example: Basic text generation with Gemini"""
-    print("\n=== Basic Generation Example ===")
-    
-    # Get API key from environment
-    api_key = os.getenv("GEMINI_API_KEY")
+async def main():
+    api_key = os.environ.get("GEMINI_API_KEY")
     if not api_key:
-        print("Set GEMINI_API_KEY environment variable to run this example")
+        print("Please set GEMINI_API_KEY environment variable.")
         return
-    
-    # Initialize with custom options
-    options = GeminiOptions(
-        temperature=0.7,
-        max_output_tokens=256
-    )
-    llm = GeminiLLM(api_key=api_key, options=options)
-    
-    try:
-        # Generate a response
-        response = await llm.generate("Explain what Python is in one sentence.")
-        print(f"Response: {response}")
-    finally:
-        await llm.stop()
 
+    import logging
+    log_level_str = os.environ.get("LOG_LEVEL", "INFO").upper()
+    log_level = getattr(logging, log_level_str, logging.INFO)
+    logger = Logger("Chatbot", level=log_level)
+    
+    # Initialize LLM
+    model_name = os.environ.get("GEMINI_MODEL", "gemini-2.5-flash-lite")
+    llm = GeminiLLM(api_key=api_key, logger=logger, model=model_name)
 
-async def chat_example():
-    """Example: Multi-turn chat conversation"""
-    print("\n=== Chat Example ===")
-    
-    api_key = os.getenv("GEMINI_API_KEY")
-    if not api_key:
-        print("Set GEMINI_API_KEY environment variable to run this example")
-        return
-    
-    llm = GeminiLLM(api_key=api_key)
-    
-    try:
-        # Create a conversation
-        messages = [
-            Message(role="user", content="What is the capital of France?")
-        ]
-        
-        response = await llm.chat(messages)
-        print(f"User: {messages[0].content}")
-        print(f"Assistant: {response.content}")
-        
-        # Continue the conversation
-        messages.append(response)
-        messages.append(Message(role="user", content="What's a famous landmark there?"))
-        
-        response2 = await llm.chat(messages)
-        print(f"User: {messages[-1].content}")
-        print(f"Assistant: {response2.content}")
-    finally:
-        await llm.stop()
-
-
-async def tool_calling_example():
-    """Example: Using tools with Gemini"""
-    print("\n=== Tool Calling Example ===")
-    
-    api_key = os.getenv("GEMINI_API_KEY")
-    if not api_key:
-        print("Set GEMINI_API_KEY environment variable to run this example")
-        return
-    
-    llm = GeminiLLM(api_key=api_key)
-    
-    # Define a tool
-    def get_weather(city: str, unit: str = "celsius") -> str:
-        """Mock weather function"""
-        return f"The weather in {city} is 22 degrees {unit}"
-    
+    # Initialize Tools
     weather_tool = Tool(
         name="get_weather",
-        description="Get the current weather for a city",
+        description="Get the weather for a specific location",
         parameters=[
-            ToolParam(
-                name="city",
-                type="string",
-                description="The city name",
-                required=True
-            ),
-            ToolParam(
-                name="unit",
-                type="string",
-                description="Temperature unit (celsius or fahrenheit)",
-                required=False,
-                enums=["celsius", "fahrenheit"]
-            )
+            ToolParam(name="location", type="string", description="The city and state, e.g. San Francisco, CA", required=True)
         ],
         function=get_weather
     )
     
-    try:
-        messages = [
-            Message(role="user", content="What's the weather like in Tokyo?")
-        ]
-        
-        response = await llm.chat(messages, tools=[weather_tool])
-        print(f"User: {messages[0].content}")
-        
-        if response.tool_calls:
-            print(f"Tool call: {response.tool_calls[0].name}")
-            print(f"Arguments: {response.tool_calls[0].arguments}")
+    # Initialize Agent
+    agent = Agent(
+        name="WeatherBot",
+        base_prompt="You are a helpful weather assistant.",
+        tools=[weather_tool],
+        llm=llm,
+        logger=logger
+    )
+
+    print("Chatbot started! Type 'exit' to quit.")
+    
+    while True:
+        user_input = input("You: ")
+        if user_input.lower() in ["exit", "quit"]:
+            break
             
-            # Execute the tool
-            tool_result = get_weather(**response.tool_calls[0].arguments)
-            print(f"Tool result: {tool_result}")
-        else:
-            print(f"Assistant: {response.content}")
-    finally:
-        await llm.stop()
+        print("Bot: ", end="", flush=True)
+        async for chunk in agent(user_input, stream=True):
+            if isinstance(chunk, dict):
+                if "content" in chunk:
+                    content = chunk["content"]
+                    if isinstance(content, dict): # Message object dumped
+                         # Skip full message dumps, we want the stream chunks if possible or just final text
+                         pass
+                    elif isinstance(content, str): # Tool response or error
+                         # print(content) # Maybe don't print tool output directly to user
+                         pass
+            else:
+                 pass # String chunks ? Agent yield dicts.
+                 
+            # Agent yields:
+            # {"agent_name": name, "content": chunk} where chunk is Message.dump() or str (tool response)
+            # wait, agent.py yields:
+            # 1. {"agent_name": self.name, 'content': chunk.model_dump()} (if Message)
+            # 2. {"agent_name": self.name, 'content': chunk} (if str - tool response)
+            
+            # Streaming from LLM yields Message objects with partial content?
+            # execute_stream yields Message objects constructed from chunks. 
+            # Actually execute_stream yields:
+            # 1. Message (partial content)
+            # 2. Dict (tool call)
+            # 3. Dict (tool response)
+            
+            # Agent.__call__ wraps these:
+            # If chunk is Message -> yields dict with content=chunk.dump()
+            # If chunk is other -> yields dict with content=chunk
+            
+            # So if we want to print the token stream:
+            # The Agent logic in execute_stream accumulates content and yields a Message for each chunk?
+            # No.
+            # `yield Message(role="assistant", content=response.content ...)`
+            # So it yields a Message object for EACH chunk of text.
+            
+            if isinstance(chunk, dict) and "content" in chunk:
+                content_obj = chunk["content"]
+                if isinstance(content_obj, dict) and "content" in content_obj and content_obj["content"]:
+                     # It's a message dump
+                     print(content_obj["content"], end="", flush=True)
 
-
-def check_capabilities():
-    """Example: Check LLM capabilities"""
-    print("\n=== Checking Capabilities ===")
-    
-    llm = GeminiLLM(api_key="dummy-key")
-    
-    print(f"GeminiLLM capabilities:")
-    for cap in llm.capabilities:
-        print(f"  - {cap.name}")
-    
-    # Check specific capability
-    if LLMCapability.TOOLS in llm.capabilities:
-        print("\n✓ Tool calling is supported")
-    if LLMCapability.VISION in llm.capabilities:
-        print("✓ Vision (image) input is supported")
-
-
-async def streaming_example():
-    """Example: Streaming text generation"""
-    print("\n=== Streaming Generation Example ===")
-    
-    api_key = os.getenv("GEMINI_API_KEY")
-    if not api_key:
-        print("Set GEMINI_API_KEY environment variable to run this example")
-        return
-    
-    llm = GeminiLLM(api_key=api_key)
-    
-    try:
-        print("Response: ", end="", flush=True)
-        # Generate a streaming response
-        stream = await llm.generate("what is a LLM?", stream=True)
-        
-        async for chunk in stream:
-            print(chunk, end="", flush=True)
-        print()  # Newline after stream
-    finally:
-        await llm.stop()
-
-
-def main():
-    """Run all examples"""
-    print("RAW Library - GeminiLLM Examples")
-    print("=" * 40)
-    
-    # Synchronous capability check (no API call needed)
-    check_capabilities()
-    
-    # Async examples (require API key)
-    print("\n" + "=" * 40)
-    print("Running async examples...")
-    print("(Set GEMINI_API_KEY environment variable)")
-    print("=" * 40)
-    
-    asyncio.run(basic_generation_example())
-    asyncio.run(streaming_example())
-    asyncio.run(chat_example())
-    asyncio.run(tool_calling_example())
-
+        print() # Newline after response
 
 if __name__ == "__main__":
-    main()
+    asyncio.run(main())
