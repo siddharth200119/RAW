@@ -1,0 +1,48 @@
+[project]
+name = "raw"
+version = "0.1.0"
+description = "A powerful and flexible LLM interface library for Gemini and other models."
+readme = "README.md"
+requires-python = ">=3.14"
+authors = [
+    { name = "Siddharth", email = "siddharth@example.com" }
+]
+license = "MIT"
+classifiers = [
+    "Development Status :: 4 - Beta",
+    "Intended Audience :: Developers",
+    "License :: OSI Approved :: MIT License",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.14",
+    "Operating System :: OS Independent",
+]
+urls = {
+    "Homepage" = "https://github.com/siddharth200119/RAW",
+    "Repository" = "https://github.com/siddharth200119/RAW",
+    "Issues" = "https://github.com/siddharth200119/RAW/issues"
+}
+dependencies = [
+    "httpx>=0.28.1",
+    "jsonschema>=4.26.0",
+    "opencv-python>=4.13.0.92",
+    "pydantic>=2.12.5",
+    "numpy>=2.0.0",
+]
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/RAW"]
+[dependency-groups]
+dev = [
+    "mypy>=1.19.1",
+    "pytest>=9.0.2",
+    "ruff>=0.15.0",
+    "twine>=6.2.0",
+    "pytest-asyncio>=0.23.0",
+]
+[tool.pytest.ini_options]
+pythonpath = [".", "src"]
+asyncio_mode = "auto"
