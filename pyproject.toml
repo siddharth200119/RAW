@@ -1,5 +1,5 @@
 [project]
-name = "raw"
+name = "raw-agent"
 version = "0.1.0"
 description = "A powerful and flexible LLM interface library for Gemini and other models."
 readme = "README.md"
