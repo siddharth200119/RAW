@@ -3,7 +3,7 @@ name = "raw-agent"
 version = "0.1.0"
 description = "A powerful and flexible LLM interface library for Gemini and other models."
 readme = "README.md"
-requires-python = ">=3.14"
+requires-python = ">=3.10"
 authors = [
     { name = "Siddharth", email = "siddharth@example.com" }
 ]
