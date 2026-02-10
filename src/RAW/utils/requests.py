@@ -62,13 +62,14 @@ class RequestsClient:
             if not stream:
                 try:
                     # Try to log JSON response if possible, otherwise text
-                    # Limit body logging to avoid huge dumps if needed, but per request "log actual response"
                     if "application/json" in response.headers.get("Content-Type", ""):
-                        self.logger.debug(f"Response Body: {response.text}") # Keeping it simple for now
+                        self.logger.debug(f"Response Body: {response.text}") 
                     else:
                         self.logger.debug(f"Response Body (text): {response.text}")
                 except Exception:
                     self.logger.debug("Response Body: <Could not decode>")
+            else:
+                 self.logger.debug("Response Body: <Streamed Content>")
 
     def request_sync(
         self,
@@ -140,11 +141,19 @@ class RequestsClient:
             self._log_response(response, stream=True)
             
             async def stream_generator():
+                content_buffer = b""
                 try:
                     async for chunk in response.aiter_bytes():
+                        content_buffer += chunk
                         yield chunk
                 finally:
                     await ctx.__aexit__(None, None, None)
+                    if self.logger:
+                        try:
+                            text = content_buffer.decode('utf-8')
+                            self.logger.debug(f"Full Streamed Response: {text}")
+                        except Exception:
+                            self.logger.debug(f"Full Streamed Response: <Could not decode {len(content_buffer)} bytes>")
             
             return stream_generator()
             

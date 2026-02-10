@@ -1,7 +1,7 @@
 import asyncio
 import os
 from RAW.agent import Agent
-from RAW.llms.gemini import GeminiLLM
+from RAW.llms import GroqLLM
 from RAW.modals import Tool
 from RAW.modals.tools import ToolParam
 from RAW.utils import Logger
@@ -13,9 +13,9 @@ async def get_weather(location: str):
     return f"The weather in {location} is sunny with a temperature of 25°C."
 
 async def main():
-    api_key = os.environ.get("GEMINI_API_KEY")
+    api_key = os.environ.get("GROQ_API_KEY")
     if not api_key:
-        print("Please set GEMINI_API_KEY environment variable.")
+        print("Please set GROQ_API_KEY environment variable.")
         return
 
     import logging
@@ -24,8 +24,8 @@ async def main():
     logger = Logger("Chatbot", level=log_level)
     
     # Initialize LLM
-    model_name = os.environ.get("GEMINI_MODEL", "gemini-2.5-flash-lite")
-    llm = GeminiLLM(api_key=api_key, logger=logger, model=model_name)
+    model_name = os.environ.get("GROQ_MODEL", "llama-3.3-70b-versatile")
+    llm = GroqLLM(api_key=api_key, logger=logger, model=model_name)
 
     # Initialize Tools
     weather_tool = Tool(
