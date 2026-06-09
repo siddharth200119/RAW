@@ -58,7 +58,11 @@ class RequestsClient:
 
     def _log_response(self, response: httpx.Response, stream: bool = False):
         if self.logger:
-            self.logger.info(f"Response Status Code: {response.status_code} | URL: {response.url}")
+            log_msg = f"Response Status Code: {response.status_code} | URL: {response.url}"
+            if response.status_code >= 400:
+                self.logger.error(log_msg)
+            else:
+                self.logger.info(log_msg)
             if not stream:
                 try:
                     # Try to log JSON response if possible, otherwise text

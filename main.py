@@ -1,102 +1,177 @@
 import asyncio
-import os
-from RAW.agent import Agent
+import sys
 from RAW.llms import VLLM
-from RAW.modals import Tool
-from RAW.modals.tools import ToolParam
+from RAW.modals import Message, jsonschema, Tool, ToolParam
 from RAW.utils import Logger
 
-# Example tool
-async def get_weather(location: str):
-    """Get the weather for a location."""
-    # Mock weather data
-    return f"The weather in {location} is sunny with a temperature of 25°C."
+
+async def run_info(llm):
+    print("\n--- Testing info() ---")
+    try:
+        info = await llm.info()
+        print(f"Model Name: {info.model_name}")
+        print(f"Provider: {info.provider}")
+        print(f"Max Tokens: {info.max_tokens}")
+        print(f"Context Window: {info.context_window}")
+        print(f"Capabilities: {[c.name for c in info.capabilities]}")
+        print(f"Metadata: {info.metadata}")
+    except Exception as e:
+        print(f"Error: {e}")
+
+
+async def run_generate(llm):
+    print("\n--- Testing generate() ---")
+    prompt = input("Enter prompt for generate: ") or "Explain quantum computing in one sentence."
+    stream_choice = input("Stream response? (y/n, default n): ").strip().lower() == "y"
+    schema_choice = input("Enforce dummy JSON schema? (y/n, default n): ").strip().lower() == "y"
+
+    schema = None
+    if schema_choice:
+        schema = jsonschema({
+            "type": "object",
+            "properties": {
+                "summary": {"type": "string", "description": "The main answer summary"},
+                "keywords": {"type": "array", "items": {"type": "string"}}
+            },
+            "required": ["summary", "keywords"]
+        })
+
+    try:
+        if stream_choice:
+            print("Response stream: ", end="", flush=True)
+            generator = await llm.generate(prompt=prompt, schema=schema, stream=True)
+            async for chunk in generator:
+                print(chunk, end="", flush=True)
+            print()
+        else:
+            response = await llm.generate(prompt=prompt, schema=schema, stream=False)
+            print(f"Response: {response}")
+    except Exception as e:
+        print(f"Error: {e}")
+
+
+async def run_chat(llm):
+    print("\n--- Testing chat() ---")
+    prompt = input("Enter chat user message: ") or "Hello, what tools do you have?"
+    stream_choice = input("Stream response? (y/n, default n): ").strip().lower() == "y"
+    tools_choice = input("Attach get_weather tool? (y/n, default n): ").strip().lower() == "y"
+
+    messages = [Message(role="user", content=prompt)]
+    
+    tools = None
+    if tools_choice:
+        async def get_weather(location: str):
+            return f"Weather in {location} is 22°C and rainy."
+
+        tools = [
+            Tool(
+                name="get_weather",
+                description="Get weather details for a location",
+                parameters=[
+                    ToolParam(name="location", type="string", description="The city name", required=True)
+                ],
+                function=get_weather
+            )
+        ]
+
+    try:
+        if stream_choice:
+            print("Response stream: ")
+            generator = await llm.chat(messages=messages, stream=True, tools=tools)
+            async for chunk in generator:
+                if chunk.content:
+                    print(chunk.content, end="", flush=True)
+                if chunk.tool_calls:
+                    print(f"\n[Tool Call] {chunk.tool_calls}")
+            print()
+        else:
+            response = await llm.chat(messages=messages, stream=False, tools=tools)
+            print(f"Response role: {response.role}")
+            print(f"Response content: {response.content}")
+            if response.tool_calls:
+                print(f"Response tool calls: {response.tool_calls}")
+    except Exception as e:
+        print(f"Error: {e}")
+
+
+async def run_count_tokens(llm):
+    print("\n--- Testing count_tokens() ---")
+    text = input("Enter text to count tokens: ") or "Hello world! This is a token counting test."
+    try:
+        count = await llm.count_tokens(text)
+        print(f"Token count: {count}")
+    except Exception as e:
+        print(f"Error: {e}")
+
+
+async def run_embed(llm):
+    print("\n--- Testing embed() ---")
+    text = input("Enter text to embed: ") or "Machine learning model"
+    try:
+        embedding = await llm.embed(text)
+        print(f"Embedding shape: {embedding.shape}")
+        print(f"Embedding snippet (first 5 values): {embedding[:5]}")
+    except Exception as e:
+        print(f"Error: {e}")
+
+
+async def run_stop(llm):
+    print("\n--- Testing stop() ---")
+    try:
+        await llm.stop()
+        print("LLM connection stopped/closed successfully.")
+    except Exception as e:
+        print(f"Error: {e}")
+
 
 async def main():
-    # api_key = os.environ.get("GROQ_API_KEY")
-    # if not api_key:
-    #     print("Please set GROQ_API_KEY environment variable.")
-    #     return
-
-    import logging
-    log_level_str = os.environ.get("LOG_LEVEL", "INFO").upper()
-    log_level = getattr(logging, log_level_str, logging.INFO)
-    logger = Logger("Chatbot", level=log_level)
+    logger = Logger("VLLMTest", level="INFO")
     
-    # Initialize LLM
-    model_name = os.environ.get("GROQ_MODEL", "Qwen/Qwen2.5-32B-Instruct-AWQ")
-    llm = VLLM(base_url = "http://14.195.173.186:4040", logger=logger, model=model_name)
-
-    # Initialize Tools
-    weather_tool = Tool(
-        name="get_weather",
-        description="Get the weather for a specific location",
-        parameters=[
-            ToolParam(name="location", type="string", description="The city and state, e.g. San Francisco, CA", required=True)
-        ],
-        function=get_weather
-    )
+    print("Initializing VLLM with:")
+    print("  Model: Qwen/Qwen3.5-9B")
+    print("  Base URL: http://192.168.10.198:8002")
     
-    # Initialize Agent
-    agent = Agent(
-        name="WeatherBot",
-        base_prompt="You are a helpful weather assistant.",
-        tools=[weather_tool],
-        llm=llm,
+    llm = VLLM(
+        model='Qwen/Qwen3.5-9B', 
+        base_url="http://192.168.10.198:8002",
         logger=logger
     )
 
-    print("Chatbot started! Type 'exit' to quit.")
-    
-    while True:
-        user_input = input("You: ")
-        if user_input.lower() in ["exit", "quit"]:
-            break
-            
-        print("Bot: ", end="", flush=True)
-        async for chunk in agent(user_input, stream=True):
-            if isinstance(chunk, dict):
-                if "content" in chunk:
-                    content = chunk["content"]
-                    if isinstance(content, dict): # Message object dumped
-                         # Skip full message dumps, we want the stream chunks if possible or just final text
-                         pass
-                    elif isinstance(content, str): # Tool response or error
-                         # print(content) # Maybe don't print tool output directly to user
-                         pass
-            else:
-                 pass # String chunks ? Agent yield dicts.
-                 
-            # Agent yields:
-            # {"agent_name": name, "content": chunk} where chunk is Message.dump() or str (tool response)
-            # wait, agent.py yields:
-            # 1. {"agent_name": self.name, 'content': chunk.model_dump()} (if Message)
-            # 2. {"agent_name": self.name, 'content': chunk} (if str - tool response)
-            
-            # Streaming from LLM yields Message objects with partial content?
-            # execute_stream yields Message objects constructed from chunks. 
-            # Actually execute_stream yields:
-            # 1. Message (partial content)
-            # 2. Dict (tool call)
-            # 3. Dict (tool response)
-            
-            # Agent.__call__ wraps these:
-            # If chunk is Message -> yields dict with content=chunk.dump()
-            # If chunk is other -> yields dict with content=chunk
-            
-            # So if we want to print the token stream:
-            # The Agent logic in execute_stream accumulates content and yields a Message for each chunk?
-            # No.
-            # `yield Message(role="assistant", content=response.content ...)`
-            # So it yields a Message object for EACH chunk of text.
-            
-            if isinstance(chunk, dict) and "content" in chunk:
-                content_obj = chunk["content"]
-                if isinstance(content_obj, dict) and "content" in content_obj and content_obj["content"]:
-                     # It's a message dump
-                     print(content_obj["content"], end="", flush=True)
+    menu = {
+        "1": ("info()", run_info),
+        "2": ("generate()", run_generate),
+        "3": ("chat()", run_chat),
+        "4": ("count_tokens()", run_count_tokens),
+        "5": ("embed()", run_embed),
+        "6": ("stop()", run_stop),
+    }
 
-        print() # Newline after response
+    while True:
+        print("\n==============================")
+        print("VLLM Method Test Runner Menu")
+        print("==============================")
+        for key, val in menu.items():
+            print(f" {key}. Run {val[0]}")
+        print(" q. Exit Test Runner")
+        
+        choice = input("\nSelect a method to run: ").strip().lower()
+        if choice == "q":
+            print("Exiting.")
+            # Ensure we close connections
+            try:
+                await llm.stop()
+            except:
+                pass
+            break
+        elif choice in menu:
+            name, func = menu[choice]
+            await func(llm)
+        else:
+            print("Invalid choice, please select again.")
+
 
 if __name__ == "__main__":
-    asyncio.run(main())
+    try:
+        asyncio.run(main())
+    except KeyboardInterrupt:
+        print("\nExited by user.")

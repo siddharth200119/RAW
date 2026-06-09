@@ -2,7 +2,7 @@ from .base import BaseLLM
 from RAW.utils import RequestsClient, Logger
 from pydantic import BaseModel
 from typing import List, Optional, Dict, Union, AsyncGenerator, Literal
-from RAW.modals import LLMCapability, Message, Image, Tool, ToolCall
+from RAW.modals import LLMCapability, Message, Image, Tool, ToolCall, LLMInfo, jsonschema
 import json
 import numpy as np
 import re
@@ -43,7 +43,7 @@ class VLLM(BaseLLM):
         self.capabilities: List[LLMCapability] = OPENAI_MODEL_CAPABILITIES.get(model, [LLMCapability.COMPLETION])
         self.logger = logger
 
-    async def generate(self, prompt: str, images: Optional[List[Image]] = None, schema: Optional[Union[str, Dict]] = None, stream: bool = False) -> Union[str, Dict, AsyncGenerator[Union[str, Dict], None]]:
+    async def generate(self, prompt: str, images: Optional[List[Image]] = None, schema: Optional[jsonschema] = None, stream: bool = False) -> Union[str, Dict, AsyncGenerator[Union[str, Dict], None]]:
         if not prompt:
             self.logger.warning("Prompt is empty.")
         
@@ -287,6 +287,83 @@ class VLLM(BaseLLM):
             self.logger.error(f"Streaming error: {str(e)}")
             raise RuntimeError(f"Streaming error: {str(e)}")
     
+    async def _check_tool_support(self) -> bool:
+        body = {
+            "model": self.model,
+            "messages": [{"role": "user", "content": "ping"}],
+            "max_tokens": 1,
+            "tools": [
+                {
+                    "type": "function",
+                    "function": {
+                        "name": "ping_tool",
+                        "description": "ping tool to check support",
+                        "parameters": {
+                            "type": "object",
+                            "properties": {
+                                "input": {"type": "string"}
+                            }
+                        }
+                    }
+                }
+            ]
+        }
+        try:
+            response = await self.client.post("/chat/completions", json=body, is_async=True)
+            if response.status_code == 200:
+                return True
+            if self.logger:
+                self.logger.debug(f"Tool check failed with status {response.status_code}: {response.text}")
+            return False
+        except Exception as e:
+            if self.logger:
+                self.logger.debug(f"Tool check exception: {str(e)}")
+            return False
+
+    async def info(self) -> LLMInfo:
+        has_tools = await self._check_tool_support()
+        capabilities = list(self.capabilities)
+        if has_tools:
+            if LLMCapability.TOOLS not in capabilities:
+                capabilities.append(LLMCapability.TOOLS)
+        else:
+            if LLMCapability.TOOLS in capabilities:
+                capabilities.remove(LLMCapability.TOOLS)
+        self.capabilities = capabilities
+
+        max_tokens = None
+        if self.options and self.options.max_tokens:
+            max_tokens = self.options.max_tokens
+        
+        return LLMInfo(
+            model_name=self.model,
+            provider="vllm",
+            max_tokens=max_tokens,
+            context_window=32768,
+            capabilities=self.capabilities,
+            metadata={}
+        )
+
+    async def count_tokens(self, text_or_messages: Union[str, List[Message]]) -> int:
+        if isinstance(text_or_messages, str):
+            prompt = text_or_messages
+        else:
+            prompt = "".join([m.content or "" for m in text_or_messages])
+            
+        body = {
+            "model": self.model,
+            "prompt": prompt
+        }
+        try:
+            root_url = str(self.client.client.base_url).rstrip("/").replace("/v1", "") + "/tokenize"
+            response = await self.client.post(root_url, json=body, is_async=True)
+            response.raise_for_status()
+            data = response.json()
+            return len(data.get("tokens", []))
+        except Exception:
+            # Fallback estimation (approx 4 chars per token)
+            return len(prompt) // 4
+
     async def embed(self, text: str) -> np.ndarray:
         body = {"model": self.model, "input": text}
         try:
