@@ -156,7 +156,7 @@ class Agent:
                         "arguments": tool_call.arguments
                     }
                     self.logger.info(
-                        message=f"Tool Called: {tool_call.name} with arguments {tool_call.arguments}"
+                        msg=f"Tool Called: {tool_call.name} with arguments {tool_call.arguments}"
                     )
                     tool_func = next((t.function for t in self.tools if t.name == tool_call.name), None)
                     if tool_func:
@@ -189,7 +189,7 @@ class Agent:
                 continue
             if response.content:
                 self.logger.info(
-                    message=f"{self.name}: {response.content}"
+                    msg=f"{self.name}: {response.content}"
                 )
                 yield response.content
                 return

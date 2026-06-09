@@ -1,5 +1,5 @@
 from abc import ABC
-from RAW.modals import Message, Image, LLMInfo, jsonschema
+from RAW.modals import Message, Image, LLMInfo, jsonschema, Tool
 from typing import List, Union, AsyncGenerator, Optional, Dict
 import numpy as np
 
@@ -19,7 +19,8 @@ class BaseLLM(ABC):
         self, 
         messages: List[Message],
         schema: Optional[str] = None,
-        stream: bool = False
+        stream: bool = False,
+        tools: Optional[List[Tool]] = None
     ) -> Union[Message, AsyncGenerator[Message, None]]:
         raise NotImplementedError("This LLM provider does not implement the chat method.")
 
