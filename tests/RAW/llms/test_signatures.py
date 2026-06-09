@@ -108,29 +108,39 @@ def test_base_llm_method_signatures():
     )
 
 
-def test_vllm_signature_conformance():
-    """Verify that VLLM subclass implements the same public methods with matching signatures."""
+def test_all_llms_signature_conformance():
+    """Verify that all subclasses of BaseLLM in RAW.llms implement matching signatures."""
+    import RAW.llms
+    
+    # Discover all classes in RAW.llms that inherit from BaseLLM, excluding BaseLLM itself
+    subclasses = []
+    for item_name in dir(RAW.llms):
+        item = getattr(RAW.llms, item_name)
+        if isinstance(item, type) and issubclass(item, BaseLLM) and item is not BaseLLM:
+            subclasses.append(item)
+            
     base_methods = [m for m in dir(BaseLLM) if not m.startswith("_")]
     
-    for method_name in base_methods:
-        base_func = getattr(BaseLLM, method_name)
-        if not inspect.iscoroutinefunction(base_func) and not inspect.isfunction(base_func):
-            continue
+    for subclass in subclasses:
+        for method_name in base_methods:
+            base_func = getattr(BaseLLM, method_name)
+            if not inspect.iscoroutinefunction(base_func) and not inspect.isfunction(base_func):
+                continue
+                
+            assert hasattr(subclass, method_name), f"{subclass.__name__} is missing method: {method_name}"
             
-        assert hasattr(VLLM, method_name), f"VLLM is missing method: {method_name}"
-        
-        # Check signature matches
-        base_sig = inspect.signature(base_func)
-        sub_sig = inspect.signature(getattr(VLLM, method_name))
-        
-        base_params = list(base_sig.parameters.values())
-        sub_params = list(sub_sig.parameters.values())
-        
-        # Subclasses can support extra optional parameters, but all base parameters must match
-        assert len(sub_params) >= len(base_params), f"VLLM.{method_name} has fewer parameters than base method."
-        
-        for bp, sp in zip(base_params, sub_params):
-            assert bp.name == sp.name, f"Parameter mismatch in VLLM.{method_name}. Expected {bp.name}, got {sp.name}"
-            # Verify default values match if specified in base
-            if bp.default is not inspect.Parameter.empty:
-                assert bp.default == sp.default, f"Parameter default value mismatch in VLLM.{method_name} for '{bp.name}'"
+            # Check signature matches
+            base_sig = inspect.signature(base_func)
+            sub_sig = inspect.signature(getattr(subclass, method_name))
+            
+            base_params = list(base_sig.parameters.values())
+            sub_params = list(sub_sig.parameters.values())
+            
+            # Subclasses can support extra optional parameters, but all base parameters must match
+            assert len(sub_params) >= len(base_params), f"{subclass.__name__}.{method_name} has fewer parameters than base method."
+            
+            for bp, sp in zip(base_params, sub_params):
+                assert bp.name == sp.name, f"Parameter mismatch in {subclass.__name__}.{method_name}. Expected {bp.name}, got {sp.name}"
+                # Verify default values match if specified in base
+                if bp.default is not inspect.Parameter.empty:
+                    assert bp.default == sp.default, f"Parameter default value mismatch in {subclass.__name__}.{method_name} for '{bp.name}'"

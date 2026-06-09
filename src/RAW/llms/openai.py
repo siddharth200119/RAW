@@ -1,51 +1,59 @@
-from .base import BaseLLM
-from RAW.utils import RequestsClient, Logger, count_tokens as count_tokens_util
+import os
+import json
+import re
+import numpy as np
 from pydantic import BaseModel
 from typing import List, Optional, Dict, Union, AsyncGenerator, Literal
+from .base import BaseLLM
+from RAW.utils import RequestsClient, Logger, count_tokens as count_tokens_util
 from RAW.modals import LLMCapability, Message, Image, Tool, ToolCall, LLMInfo, jsonschema
-import json
-import numpy as np
-import re
 
-class VLLMOptions(BaseModel):
+
+class OpenAIOptions(BaseModel):
     temperature: Optional[float] = None
     top_p: Optional[float] = None
     max_tokens: Optional[int] = None
     stop: Optional[List[str]] = None
 
+
 OPENAI_MODEL_CAPABILITIES: Dict[str, List[LLMCapability]] = {
-    "Qwen/Qwen2.5-32B-Instruct-AWQ": [LLMCapability.TOOLS, LLMCapability.COMPLETION],
-    "Qwen/Qwen2.5-14B-Instruct-AWQ": [LLMCapability.TOOLS, LLMCapability.COMPLETION],
-    "Qwen/Qwen2.5-32B-Instruct-GPTQ-Int4": [LLMCapability.TOOLS, LLMCapability.COMPLETION],
-    "Qwen/Qwen2.5-14B-Instruct-GPTQ-Int4": [LLMCapability.TOOLS, LLMCapability.COMPLETION],
-    "google/gemma-3-12b-it": [LLMCapability.COMPLETION, LLMCapability.VISION],
-    'Qwen/Qwen2-VL-7B': [LLMCapability.COMPLETION, LLMCapability.VISION],
-    'Qwen/Qwen2.5-VL-7B-Instruct': [LLMCapability.COMPLETION, LLMCapability.VISION],
+    "gpt-4o": [LLMCapability.COMPLETION, LLMCapability.VISION, LLMCapability.TOOLS],
+    "gpt-4o-mini": [LLMCapability.COMPLETION, LLMCapability.VISION, LLMCapability.TOOLS],
+    "gpt-4-turbo": [LLMCapability.COMPLETION, LLMCapability.VISION, LLMCapability.TOOLS],
+    "gpt-4": [LLMCapability.COMPLETION, LLMCapability.TOOLS],
+    "gpt-3.5-turbo": [LLMCapability.COMPLETION, LLMCapability.TOOLS],
 }
 
-_Role = Literal["user", "assistant", "system", "tool"]
 
-class VLLM(BaseLLM):
+class OpenAILLM(BaseLLM):
     def __init__(
-        self, 
-        model: str = "Qwen/Qwen2.5-14B-Instruct-AWQ", 
-        base_url: str = "http://127.0.0.1:11434", 
-        options: Optional[VLLMOptions] = None, 
+        self,
+        model: str = "gpt-4o-mini",
+        api_key: Optional[str] = None,
+        base_url: str = "https://api.openai.com",
+        options: Optional[OpenAIOptions] = None,
         logger: Optional[Logger] = None
     ):
+        api_key = api_key or os.environ.get("OPENAI_API_KEY")
+        headers = {}
+        if api_key:
+            headers["Authorization"] = f"Bearer {api_key}"
+
         self.client = RequestsClient(
             base_url=f"{base_url}/v1",
+            headers=headers,
             timeout=300,
             logger=logger
         )
         self.model = model
         self.options = options
-        self.capabilities: List[LLMCapability] = OPENAI_MODEL_CAPABILITIES.get(model, [LLMCapability.COMPLETION])
+        self.capabilities: List[LLMCapability] = OPENAI_MODEL_CAPABILITIES.get(model, [LLMCapability.COMPLETION, LLMCapability.TOOLS])
         self.logger = logger
 
     async def generate(self, prompt: str, images: Optional[List[Image]] = None, schema: Optional[jsonschema] = None, stream: bool = False) -> Union[str, Dict, AsyncGenerator[Union[str, Dict], None]]:
         if not prompt:
-            self.logger.warning("Prompt is empty.")
+            if self.logger:
+                self.logger.warning("Prompt is empty.")
         
         body = {
             "model": self.model,
@@ -176,9 +184,10 @@ class VLLM(BaseLLM):
             ]
         return msg_dict
 
-    async def chat(self, messages: Optional[List[Message]] = None, schema: Optional[str] = None, stream: bool = False, tools: Optional[List[Tool]] = None) -> Union[Message, AsyncGenerator[Message, None]]:
+    async def chat(self, messages: List[Message], schema: Optional[str] = None, stream: bool = False, tools: Optional[List[Tool]] = None) -> Union[Message, AsyncGenerator[Message, None]]:
         if not messages:
-            self.logger.warning("Messages list is empty.")
+            if self.logger:
+                self.logger.warning("Messages list is empty.")
             messages = []
         
         body = {
@@ -223,13 +232,12 @@ class VLLM(BaseLLM):
                 tool_calls=tool_calls
             )
         except Exception as e:
-            self.logger.error(f"Chat error: {str(e)}")
+            if self.logger:
+                self.logger.error(f"Chat error: {str(e)}")
             raise RuntimeError(f"Chat error: {str(e)}")
 
     async def _stream_chat_response(self, body: Dict) -> AsyncGenerator[Message, None]:
         tool_call_chunks = {}
-        has_tool_calls = False
-                
         try:
             stream_gen = await self.client.post("/chat/completions", json=body, stream=True, is_async=True)
             async for chunk in stream_gen:
@@ -256,7 +264,6 @@ class VLLM(BaseLLM):
                             yield Message(role="assistant", content=delta["content"], tool_calls=[], images=[])
 
                         if "tool_calls" in delta:
-                            has_tool_calls = True
                             for tc_chunk in delta["tool_calls"]:
                                 idx = tc_chunk.get("index", 0)
                                 if idx not in tool_call_chunks:
@@ -284,9 +291,10 @@ class VLLM(BaseLLM):
                 yield Message(role="assistant", content=None, images=[], tool_calls=tool_calls)
                                 
         except Exception as e:
-            self.logger.error(f"Streaming error: {str(e)}")
+            if self.logger:
+                self.logger.error(f"Streaming error: {str(e)}")
             raise RuntimeError(f"Streaming error: {str(e)}")
-    
+
     async def _check_tool_support(self) -> bool:
         body = {
             "model": self.model,
@@ -337,31 +345,15 @@ class VLLM(BaseLLM):
         
         return LLMInfo(
             model_name=self.model,
-            provider="vllm",
+            provider="openai",
             max_tokens=max_tokens,
-            context_window=32768,
+            context_window=16384,
             capabilities=self.capabilities,
             metadata={}
         )
 
     async def count_tokens(self, text_or_messages: Union[str, List[Message]]) -> int:
-        if isinstance(text_or_messages, str):
-            prompt = text_or_messages
-        else:
-            prompt = "".join([m.content or "" for m in text_or_messages])
-            
-        body = {
-            "model": self.model,
-            "prompt": prompt
-        }
-        try:
-            root_url = str(self.client.client.base_url).rstrip("/").replace("/v1", "") + "/tokenize"
-            response = await self.client.post(root_url, json=body, is_async=True)
-            response.raise_for_status()
-            data = response.json()
-            return len(data.get("tokens", []))
-        except Exception:
-            return count_tokens_util(text_or_messages, self.model)
+        return count_tokens_util(text_or_messages, self.model)
 
     async def embed(self, text: str) -> np.ndarray:
         body = {"model": self.model, "input": text}
