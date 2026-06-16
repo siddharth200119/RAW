@@ -4,20 +4,27 @@ import numpy as np
 from unittest.mock import MagicMock, AsyncMock, patch
 from RAW.llms.vllm import VLLM, VLLMOptions
 from RAW.llms.openai import OpenAILLM, OpenAIOptions
+from RAW.llms.gemini import GeminiLLM, GeminiOptions
 from RAW.modals import LLMCapability, Message, LLMInfo, jsonschema, Tool, ToolCall
 
 
 @pytest.fixture(params=[
     (VLLM, VLLMOptions, "Qwen/Qwen2.5-14B-Instruct-AWQ", "vllm", "http://127.0.0.1:8000"),
-    (OpenAILLM, OpenAIOptions, "gpt-4o-mini", "openai", "https://api.openai.com")
+    (OpenAILLM, OpenAIOptions, "gpt-4o-mini", "openai", "https://api.openai.com"),
+    (GeminiLLM, GeminiOptions, "gemini-2.5-flash-lite", "gemini", "https://generativelanguage.googleapis.com/v1beta")
 ])
 def llm_provider_setup(request):
     llm_class, options_class, model_name, provider_name, default_base_url = request.param
-    options = options_class(temperature=0.7, max_tokens=100)
+    if options_class is GeminiOptions:
+        options = options_class(temperature=0.7, max_output_tokens=100)
+    else:
+        options = options_class(temperature=0.7, max_tokens=100)
     
     # Initialize LLM client
     if llm_class is OpenAILLM:
         client = llm_class(model=model_name, base_url=default_base_url, options=options, api_key="test_key")
+    elif llm_class is GeminiLLM:
+        client = llm_class(model=model_name, options=options, api_key="test_key")
     else:
         client = llm_class(model=model_name, base_url=default_base_url, options=options)
         
@@ -45,7 +52,7 @@ async def test_llm_info(llm_provider_setup):
         assert info.model_name == model_name
         assert info.provider == provider_name
         assert info.max_tokens == 100
-        assert info.context_window in [16384, 32768]
+        assert info.context_window in [16384, 32768, 1048576]
         assert LLMCapability.TOOLS in info.capabilities
 
 
@@ -53,11 +60,25 @@ async def test_llm_info(llm_provider_setup):
 async def test_llm_count_tokens_tokenize_success(llm_provider_setup):
     client, model_name, provider_name, default_base_url = llm_provider_setup
     
-    # If it is OpenAI, it directly uses local token counting utility
     if provider_name == "openai":
         tokens = await client.count_tokens("Hello world")
         # Fallback estimation or tiktoken (approx 4 chars per token fallback since tiktoken might not be present in test env)
         assert tokens in [2, 3] # "Hello world" is 11 chars. 11 // 4 = 2. tiktoken cl100k_base: ["Hello", " world"] is 2 tokens.
+    elif provider_name == "gemini":
+        mock_response = MagicMock(spec=httpx.Response)
+        mock_response.status_code = 200
+        mock_response.json.return_value = {"totalTokens": 5}
+
+        with patch.object(client.client, "post", new_callable=AsyncMock) as mock_post:
+            mock_post.return_value = mock_response
+
+            tokens = await client.count_tokens("Hello world")
+            assert tokens == 5
+            mock_post.assert_called_once_with(
+                f"/models/{model_name}:countTokens?key=test_key",
+                json={"contents": [{"parts": [{"text": "Hello world"}]}]},
+                is_async=True
+            )
     else:
         # VLLM makes a POST request to root url /tokenize
         mock_response = MagicMock(spec=httpx.Response)
@@ -83,6 +104,10 @@ async def test_llm_count_tokens_fallback(llm_provider_setup):
         # OpenAI uses utils count_tokens directly, which never throws unless imports or types are broken
         tokens = await client.count_tokens("Hello world testing fallback")
         assert tokens in [4, 5, 7] # "Hello world testing fallback" is 28 chars. 28 // 4 = 7. tiktoken cl100k: 5 tokens.
+    elif provider_name == "gemini":
+        with patch.object(client.client, "post", side_effect=RuntimeError("API down")):
+            tokens = await client.count_tokens("Hello world testing fallback")
+            assert tokens in [4, 5, 7]
     else:
         # VLLM count_tokens falls back to utils count_tokens on POST error
         with patch.object(client.client, "post", side_effect=RuntimeError("API down")):
@@ -95,14 +120,23 @@ async def test_llm_generate_direct(llm_provider_setup):
     client, model_name, provider_name, _ = llm_provider_setup
     mock_response = MagicMock(spec=httpx.Response)
     mock_response.status_code = 200
-    mock_response.json.return_value = {
-        "choices": [{
-            "message": {
-                "role": "assistant",
-                "content": "output text"
-            }
-        }]
-    }
+    if provider_name == "gemini":
+        mock_response.json.return_value = {
+            "candidates": [{
+                "content": {
+                    "parts": [{"text": "output text"}]
+                }
+            }]
+        }
+    else:
+        mock_response.json.return_value = {
+            "choices": [{
+                "message": {
+                    "role": "assistant",
+                    "content": "output text"
+                }
+            }]
+        }
 
     with patch.object(client.client, "post", new_callable=AsyncMock) as mock_post:
         mock_post.return_value = mock_response
@@ -112,8 +146,12 @@ async def test_llm_generate_direct(llm_provider_setup):
         assert output == "output text"
         
         call_args = mock_post.call_args[1]
-        assert call_args["json"]["response_format"] == {"type": "json_object"}
-        assert "json schema" in call_args["json"]["messages"][0]["content"][0]["text"]
+        if provider_name == "gemini":
+            assert call_args["json"]["generationConfig"]["responseMimeType"] == "application/json"
+            assert call_args["json"]["generationConfig"]["responseSchema"] == dict(schema)
+        else:
+            assert call_args["json"]["response_format"] == {"type": "json_object"}
+            assert "json schema" in call_args["json"]["messages"][0]["content"][0]["text"]
 
 
 @pytest.mark.asyncio
@@ -121,21 +159,33 @@ async def test_llm_chat_direct(llm_provider_setup):
     client, model_name, provider_name, _ = llm_provider_setup
     mock_response = MagicMock(spec=httpx.Response)
     mock_response.status_code = 200
-    mock_response.json.return_value = {
-        "choices": [{
-            "message": {
-                "role": "assistant",
-                "content": "response content",
-                "tool_calls": [{
-                    "id": "c1",
-                    "function": {
-                        "name": "calc",
-                        "arguments": '{"x": 10}'
-                    }
-                }]
-            }
-        }]
-    }
+    if provider_name == "gemini":
+        mock_response.json.return_value = {
+            "candidates": [{
+                "content": {
+                    "parts": [
+                        {"text": "response content"},
+                        {"functionCall": {"name": "calc", "args": {"x": 10}}}
+                    ]
+                }
+            }]
+        }
+    else:
+        mock_response.json.return_value = {
+            "choices": [{
+                "message": {
+                    "role": "assistant",
+                    "content": "response content",
+                    "tool_calls": [{
+                        "id": "c1",
+                        "function": {
+                            "name": "calc",
+                            "arguments": '{"x": 10}'
+                        }
+                    }]
+                }
+            }]
+        }
 
     with patch.object(client.client, "post", new_callable=AsyncMock) as mock_post:
         mock_post.return_value = mock_response
@@ -159,15 +209,19 @@ async def test_llm_chat_direct(llm_provider_setup):
 @pytest.mark.asyncio
 async def test_llm_embed(llm_provider_setup):
     client, model_name, provider_name, _ = llm_provider_setup
-    mock_response = MagicMock(spec=httpx.Response)
-    mock_response.status_code = 200
-    mock_response.json.return_value = {"embedding": [0.1, 0.2, 0.3]}
+    if provider_name == "gemini":
+        with pytest.raises(NotImplementedError):
+            await client.embed("hello")
+    else:
+        mock_response = MagicMock(spec=httpx.Response)
+        mock_response.status_code = 200
+        mock_response.json.return_value = {"embedding": [0.1, 0.2, 0.3]}
 
-    with patch.object(client.client, "post", new_callable=AsyncMock) as mock_post:
-        mock_post.return_value = mock_response
+        with patch.object(client.client, "post", new_callable=AsyncMock) as mock_post:
+            mock_post.return_value = mock_response
 
-        embedding = await client.embed("hello")
-        assert np.array_equal(embedding, np.array([0.1, 0.2, 0.3], dtype=np.float32))
+            embedding = await client.embed("hello")
+            assert np.array_equal(embedding, np.array([0.1, 0.2, 0.3], dtype=np.float32))
 
 
 @pytest.mark.asyncio

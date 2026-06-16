@@ -1,8 +1,9 @@
+import os
 from .base import BaseLLM
-from RAW.utils import RequestsClient, Logger
+from RAW.utils import RequestsClient, Logger, count_tokens as count_tokens_util
 from pydantic import BaseModel
 from typing import List, Optional, Dict, Union, AsyncGenerator, Literal
-from RAW.modals import Message, Image, Tool, ToolCall, LLMCapability
+from RAW.modals import Message, Image, Tool, ToolCall, LLMCapability, LLMInfo, jsonschema
 import httpx
 import json
 import numpy as np
@@ -28,13 +29,14 @@ Role = Literal["user", "assistant", "system", "tool"]
 class GeminiLLM(BaseLLM):
     def __init__(
         self, 
-        api_key: str, 
+        api_key: Optional[str] = None, 
         model: str = "gemini-2.5-flash-lite", 
         options: Optional[GeminiOptions] = None,
         logger: Optional[Logger] = None
     ):
         super().__init__()
         self.logger = logger or _default_logger
+        self.api_key = api_key or os.environ.get("GEMINI_API_KEY") or ""
         self.client = RequestsClient(
             base_url="https://generativelanguage.googleapis.com/v1beta",
             timeout=300,
@@ -70,7 +72,7 @@ class GeminiLLM(BaseLLM):
         self, 
         prompt: str, 
         images: Optional[List[Image]] = None, 
-        schema: Optional[Union[str, Dict]] = None, 
+        schema: Optional[jsonschema] = None, 
         stream: bool = False
     ) -> Union[str, Dict, AsyncGenerator[Union[str, Dict], None]]:
         """Generate a response from a prompt"""
@@ -100,8 +102,7 @@ class GeminiLLM(BaseLLM):
             if not body.get("generationConfig"):
                 body["generationConfig"] = {}
             body["generationConfig"]["responseMimeType"] = "application/json"
-            if isinstance(schema, dict):
-                body["generationConfig"]["responseSchema"] = schema
+            body["generationConfig"]["responseSchema"] = dict(schema)
 
         if stream:
             return self._stream_response(body)
@@ -113,7 +114,7 @@ class GeminiLLM(BaseLLM):
         try:
             url = f"/models/{self.model}:generateContent?key={self.api_key}"
             
-            response = await self.client.request_async("POST", url, json=body)
+            response = await self.client.post(url, json=body, is_async=True)
             response.raise_for_status()
             data = response.json()
             
@@ -134,7 +135,7 @@ class GeminiLLM(BaseLLM):
         try:
             url = f"/models/{self.model}:streamGenerateContent?key={self.api_key}&alt=sse"
             
-            stream_gen = await self.client.request_async("POST", url, stream=True, json=body)
+            stream_gen = await self.client.post(url, stream=True, json=body, is_async=True)
             async for chunk in stream_gen:
                 chunk_str = chunk.decode('utf-8').strip()
                 if not chunk_str:
@@ -295,7 +296,7 @@ class GeminiLLM(BaseLLM):
         try:
             url = f"/models/{self.model}:generateContent?key={self.api_key}"
             
-            response = await self.client.request_async("POST", url, json=body)
+            response = await self.client.post(url, json=body, is_async=True)
             response.raise_for_status()
             data = response.json()
             
@@ -339,7 +340,7 @@ class GeminiLLM(BaseLLM):
         try:
             url = f"/models/{self.model}:streamGenerateContent?key={self.api_key}&alt=sse"
             
-            stream_gen = await self.client.request_async("POST", url, stream=True, json=body)
+            stream_gen = await self.client.post(url, stream=True, json=body, is_async=True)
             async for chunk in stream_gen:
                 chunk_str = chunk.decode('utf-8').strip()
                 if not chunk_str:
@@ -405,3 +406,35 @@ class GeminiLLM(BaseLLM):
     async def embed(self, text: str) -> np.ndarray:
         """Embedding is not supported by GeminiLLM"""
         raise NotImplementedError("GeminiLLM does not support embedding.")
+
+    async def info(self) -> LLMInfo:
+        """Get information about the LLM."""
+        max_tokens = self.options.max_output_tokens if self.options else None
+        return LLMInfo(
+            model_name=self.model,
+            provider="gemini",
+            max_tokens=max_tokens,
+            context_window=1048576,
+            capabilities=self.capabilities,
+            metadata={}
+        )
+
+    async def count_tokens(self, text_or_messages: Union[str, List[Message]]) -> int:
+        """Count tokens in text or messages."""
+        if isinstance(text_or_messages, str):
+            contents = [{"parts": [{"text": text_or_messages}]}]
+        else:
+            contents = []
+            for i, msg in enumerate(text_or_messages):
+                prev_msgs = text_or_messages[:i] if i > 0 else None
+                contents.append(self._convert_message_to_gemini_format(msg, prev_msgs))
+                
+        body = {"contents": contents}
+        try:
+            url = f"/models/{self.model}:countTokens?key={self.api_key}"
+            response = await self.client.post(url, json=body, is_async=True)
+            response.raise_for_status()
+            data = response.json()
+            return data.get("totalTokens", 0)
+        except Exception:
+            return count_tokens_util(text_or_messages, self.model)
