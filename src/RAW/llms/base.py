@@ -30,7 +30,7 @@ class BaseLLM(ABC):
     async def embed(self, text: str) -> np.ndarray:
         raise NotImplementedError("This LLM provider does not implement the embed method.")
 
-    async def info(self) -> LLMInfo:
+    def info(self) -> LLMInfo:
         raise NotImplementedError("This LLM provider does not implement the info method.")
 
     async def count_tokens(self, text_or_messages: Union[str, List[Message]]) -> int:

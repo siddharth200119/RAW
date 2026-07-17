@@ -80,43 +80,38 @@ class RequestsClient:
         method: str,
         url: str,
         stream: bool = False,
+        raw_response: bool = False,
         **kwargs
     ) -> Union[httpx.Response, Generator[bytes, None, None]]:
         """
         Make a synchronous request.
 
-        If stream=True, returns a generator yielding bytes.
         If stream=False, returns the httpx.Response object.
+        If stream=True and raw_response=False, returns a generator yielding bytes chunks.
+        If stream=True and raw_response=True, returns the raw httpx.Response object
+          with the connection held open — the caller is responsible for iterating
+          response.iter_bytes() and the response context.
         """
-        # If url starts with http, httpx handles ignoring base_url automatically if it's an absolute URL.
-        # However, checking explicitly to be safe or if custom logic is needed, but httpx default behavior matches requirement.
-        
         self._log_request(method, url, **kwargs)
 
         if stream:
-            # For streaming, we need to use the client.stream() context manager manually or return result.
-            # But the user asked for a generator.
-            # We cannot easily yield from a context manager that closes immediately.
-            # We typically keep the connection open. verify httpx pattern.
-            # httpx.stream() is a context manager.
-            
-            # Implementation for generator using stream context:
-            # We'll rely on the client.stream context manager but we need to yield out of it.
-            # Actually, standard usage is `with client.stream(...) as response:`.
-            # If we want to return a generator that the user iterates over, we might need to handle the context differently.
-            # Let's encapsulate the stream generator.
-            
             ctx = self.client.stream(method, url, **kwargs)
             response = ctx.__enter__()
             self._log_response(response, stream=True)
-            
+
+            if raw_response:
+                # Pin ctx on the response so it isn't GC'd while the caller holds the response.
+                # Caller must call response.close() when done.
+                response._stream_ctx = ctx
+                return response
+
             def stream_generator():
                 try:
                     for chunk in response.iter_bytes():
                         yield chunk
                 finally:
                     ctx.__exit__(None, None, None)
-            
+
             return stream_generator()
 
         else:
@@ -129,13 +124,17 @@ class RequestsClient:
         method: str,
         url: str,
         stream: bool = False,
+        raw_response: bool = False,
         **kwargs
     ) -> Union[httpx.Response, AsyncGenerator[bytes, None]]:
         """
         Make an asynchronous request.
 
-        If stream=True, returns an async generator yielding bytes.
         If stream=False, returns the httpx.Response object.
+        If stream=True and raw_response=False, returns an async generator yielding bytes chunks.
+        If stream=True and raw_response=True, returns the raw httpx.Response object
+          with the connection held open — the caller is responsible for iterating
+          response.aiter_bytes() and the response context.
         """
         self._log_request(method, url, **kwargs)
 
@@ -143,7 +142,13 @@ class RequestsClient:
             ctx = self.async_client.stream(method, url, **kwargs)
             response = await ctx.__aenter__()
             self._log_response(response, stream=True)
-            
+
+            if raw_response:
+                # Pin ctx on the response so it isn't GC'd while the caller holds the response.
+                # Caller must call await response.aclose() when done.
+                response._stream_ctx = ctx
+                return response
+
             async def stream_generator():
                 content_buffer = b""
                 try:
@@ -158,9 +163,9 @@ class RequestsClient:
                             self.logger.debug(f"Full Streamed Response: {text}")
                         except Exception:
                             self.logger.debug(f"Full Streamed Response: <Could not decode {len(content_buffer)} bytes>")
-            
+
             return stream_generator()
-            
+
         else:
             response = await self.async_client.request(method, url, **kwargs)
             self._log_response(response, stream=False)
@@ -172,27 +177,27 @@ class RequestsClient:
     async def aclose(self):
         await self.async_client.aclose()
 
-    def get(self, url: str, stream: bool = False, is_async: bool = False, **kwargs):
+    def get(self, url: str, stream: bool = False, raw_response: bool = False, is_async: bool = False, **kwargs):
         if is_async:
-            return self.request_async("GET", url, stream=stream, **kwargs)
-        return self.request_sync("GET", url, stream=stream, **kwargs)
+            return self.request_async("GET", url, stream=stream, raw_response=raw_response, **kwargs)
+        return self.request_sync("GET", url, stream=stream, raw_response=raw_response, **kwargs)
 
-    def post(self, url: str, stream: bool = False, is_async: bool = False, **kwargs):
+    def post(self, url: str, stream: bool = False, raw_response: bool = False, is_async: bool = False, **kwargs):
         if is_async:
-            return self.request_async("POST", url, stream=stream, **kwargs)
-        return self.request_sync("POST", url, stream=stream, **kwargs)
+            return self.request_async("POST", url, stream=stream, raw_response=raw_response, **kwargs)
+        return self.request_sync("POST", url, stream=stream, raw_response=raw_response, **kwargs)
 
-    def put(self, url: str, stream: bool = False, is_async: bool = False, **kwargs):
+    def put(self, url: str, stream: bool = False, raw_response: bool = False, is_async: bool = False, **kwargs):
         if is_async:
-            return self.request_async("PUT", url, stream=stream, **kwargs)
-        return self.request_sync("PUT", url, stream=stream, **kwargs)
+            return self.request_async("PUT", url, stream=stream, raw_response=raw_response, **kwargs)
+        return self.request_sync("PUT", url, stream=stream, raw_response=raw_response, **kwargs)
 
-    def patch(self, url: str, stream: bool = False, is_async: bool = False, **kwargs):
+    def patch(self, url: str, stream: bool = False, raw_response: bool = False, is_async: bool = False, **kwargs):
         if is_async:
-            return self.request_async("PATCH", url, stream=stream, **kwargs)
-        return self.request_sync("PATCH", url, stream=stream, **kwargs)
+            return self.request_async("PATCH", url, stream=stream, raw_response=raw_response, **kwargs)
+        return self.request_sync("PATCH", url, stream=stream, raw_response=raw_response, **kwargs)
 
-    def delete(self, url: str, stream: bool = False, is_async: bool = False, **kwargs):
+    def delete(self, url: str, stream: bool = False, raw_response: bool = False, is_async: bool = False, **kwargs):
         if is_async:
-            return self.request_async("DELETE", url, stream=stream, **kwargs)
-        return self.request_sync("DELETE", url, stream=stream, **kwargs)
+            return self.request_async("DELETE", url, stream=stream, raw_response=raw_response, **kwargs)
+        return self.request_sync("DELETE", url, stream=stream, raw_response=raw_response, **kwargs)

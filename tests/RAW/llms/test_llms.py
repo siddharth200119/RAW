@@ -230,3 +230,55 @@ async def test_llm_stop(llm_provider_setup):
     with patch.object(client.client, "aclose", new_callable=AsyncMock) as mock_aclose:
         await client.stop()
         mock_aclose.assert_called_once()
+
+
+def test_vllm_dynamic_capabilities_success():
+    def mock_post(url, json, timeout=None):
+        mock_resp = MagicMock(spec=httpx.Response)
+        mock_resp.status_code = 200
+        return mock_resp
+
+    with patch("RAW.utils.requests.RequestsClient.post", side_effect=mock_post) as mock_post_method:
+        client = VLLM(model="Qwen/Qwen2.5-14B-Instruct-AWQ", base_url="http://127.0.0.1:11434")
+        
+        assert LLMCapability.COMPLETION in client.capabilities
+        assert LLMCapability.CHAT in client.capabilities
+        assert LLMCapability.STREAMING in client.capabilities
+        assert LLMCapability.TOOLS in client.capabilities
+        assert LLMCapability.VISION in client.capabilities
+        assert LLMCapability.EMBEDDING in client.capabilities
+        assert mock_post_method.call_count == 4
+
+
+def test_vllm_dynamic_capabilities_partial():
+    def mock_post(url, json, timeout=None):
+        mock_resp = MagicMock(spec=httpx.Response)
+        content = json.get("messages", [{}])[0].get("content")
+        has_image = False
+        if isinstance(content, list):
+            has_image = any(item.get("type") == "image_url" for item in content if isinstance(item, dict))
+
+        if url == "/chat/completions" and "tools" not in json and not has_image:
+            mock_resp.status_code = 200
+        else:
+            mock_resp.status_code = 400
+        return mock_resp
+
+    with patch("RAW.utils.requests.RequestsClient.post", side_effect=mock_post):
+        client = VLLM(model="Qwen/Qwen2.5-14B-Instruct-AWQ", base_url="http://127.0.0.1:11434")
+        
+        assert LLMCapability.COMPLETION in client.capabilities
+        assert LLMCapability.CHAT in client.capabilities
+        assert LLMCapability.STREAMING in client.capabilities
+        assert LLMCapability.TOOLS not in client.capabilities
+        assert LLMCapability.VISION not in client.capabilities
+        assert LLMCapability.EMBEDDING not in client.capabilities
+
+
+def test_vllm_dynamic_capabilities_connection_error():
+    with patch("RAW.utils.requests.RequestsClient.post", side_effect=httpx.ConnectError("Connection refused")):
+        client = VLLM(model="Qwen/Qwen2.5-14B-Instruct-AWQ", base_url="http://127.0.0.1:11434")
+        
+        fallback_expected = [LLMCapability.TOOLS, LLMCapability.COMPLETION]
+        assert client.capabilities == fallback_expected
+

@@ -6,6 +6,7 @@ from RAW.modals import LLMCapability, Message, Image, Tool, ToolCall, LLMInfo, j
 import json
 import numpy as np
 import re
+import httpx
 
 class VLLMOptions(BaseModel):
     temperature: Optional[float] = None
@@ -13,15 +14,6 @@ class VLLMOptions(BaseModel):
     max_tokens: Optional[int] = None
     stop: Optional[List[str]] = None
 
-OPENAI_MODEL_CAPABILITIES: Dict[str, List[LLMCapability]] = {
-    "Qwen/Qwen2.5-32B-Instruct-AWQ": [LLMCapability.TOOLS, LLMCapability.COMPLETION],
-    "Qwen/Qwen2.5-14B-Instruct-AWQ": [LLMCapability.TOOLS, LLMCapability.COMPLETION],
-    "Qwen/Qwen2.5-32B-Instruct-GPTQ-Int4": [LLMCapability.TOOLS, LLMCapability.COMPLETION],
-    "Qwen/Qwen2.5-14B-Instruct-GPTQ-Int4": [LLMCapability.TOOLS, LLMCapability.COMPLETION],
-    "google/gemma-3-12b-it": [LLMCapability.COMPLETION, LLMCapability.VISION],
-    'Qwen/Qwen2-VL-7B': [LLMCapability.COMPLETION, LLMCapability.VISION],
-    'Qwen/Qwen2.5-VL-7B-Instruct': [LLMCapability.COMPLETION, LLMCapability.VISION],
-}
 
 _Role = Literal["user", "assistant", "system", "tool"]
 
@@ -29,19 +21,75 @@ class VLLM(BaseLLM):
     def __init__(
         self, 
         model: str = "Qwen/Qwen2.5-14B-Instruct-AWQ", 
-        base_url: str = "http://127.0.0.1:11434", 
+        base_url: Optional[str] = None, 
         options: Optional[VLLMOptions] = None, 
-        logger: Optional[Logger] = None
+        logger: Optional[Logger] = None,
+        client: Optional[RequestsClient] = None
     ):
-        self.client = RequestsClient(
+        if client is None and base_url is None:
+            raise ValueError("Either 'client' or 'base_url' must be provided.")
+        self.client = client or RequestsClient(
             base_url=f"{base_url}/v1",
             timeout=300,
             logger=logger
         )
         self.model = model
         self.options = options
-        self.capabilities: List[LLMCapability] = OPENAI_MODEL_CAPABILITIES.get(model, [LLMCapability.COMPLETION])
         self.logger = logger
+        self._initialize_capabilities()
+
+    def _initialize_capabilities(self):
+        try:
+            # 1. Check completion support.
+            response = self.client.post(
+                "/chat/completions",
+                json={
+                    "model": self.model,
+                    "messages": [{"role": "user", "content": "ping"}],
+                    "max_tokens": 1
+                }
+            )
+            if response.status_code != 200:
+                self.capabilities = [LLMCapability.COMPLETION]
+                return
+        except Exception as e:
+            if self.logger:
+                self.logger.debug(f"Dynamic capability check failed to reach provider: {e}")
+            self.capabilities = [LLMCapability.COMPLETION]
+            return
+
+        # If the completion request succeeded, check other capabilities.
+        caps = [LLMCapability.COMPLETION, LLMCapability.CHAT, LLMCapability.STREAMING]
+
+        # 2. Check tools support
+        try:
+            response = self.client.post("/chat/completions", json=self._tool_check_body())
+            if response.status_code == 200:
+                caps.append(LLMCapability.TOOLS)
+        except Exception:
+            pass
+
+        # 3. Check vision support
+        try:
+            response = self.client.post("/chat/completions", json=self._vision_check_body())
+            if response.status_code == 200:
+                caps.append(LLMCapability.VISION)
+        except Exception:
+            pass
+
+        # 4. Check embedding support
+        try:
+            response = self.client.post(
+                "/embeddings",
+                json={"model": self.model, "input": "ping"}
+            )
+            if response.status_code == 200:
+                caps.append(LLMCapability.EMBEDDING)
+        except Exception:
+            pass
+
+        self.capabilities = caps
+
 
     async def generate(self, prompt: str, images: Optional[List[Image]] = None, schema: Optional[jsonschema] = None, stream: bool = False) -> Union[str, Dict, AsyncGenerator[Union[str, Dict], None]]:
         if not prompt:
@@ -287,8 +335,8 @@ class VLLM(BaseLLM):
             self.logger.error(f"Streaming error: {str(e)}")
             raise RuntimeError(f"Streaming error: {str(e)}")
     
-    async def _check_tool_support(self) -> bool:
-        body = {
+    def _tool_check_body(self) -> Dict:
+        return {
             "model": self.model,
             "messages": [{"role": "user", "content": "ping"}],
             "max_tokens": 1,
@@ -308,8 +356,24 @@ class VLLM(BaseLLM):
                 }
             ]
         }
+
+    def _vision_check_body(self) -> Dict:
+        _PING_IMAGE = "data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNkYAAAAAYAAjCB0C8AAAAASUVORK5CYII="
+        return {
+            "model": self.model,
+            "messages": [{
+                "role": "user",
+                "content": [
+                    {"type": "text", "text": "ping"},
+                    {"type": "image_url", "image_url": {"url": _PING_IMAGE}}
+                ]
+            }],
+            "max_tokens": 1
+        }
+
+    async def _check_tool_support(self) -> bool:
         try:
-            response = await self.client.post("/chat/completions", json=body, is_async=True)
+            response = await self.client.post("/chat/completions", json=self._tool_check_body(), is_async=True)
             if response.status_code == 200:
                 return True
             if self.logger:
@@ -320,17 +384,20 @@ class VLLM(BaseLLM):
                 self.logger.debug(f"Tool check exception: {str(e)}")
             return False
 
-    async def info(self) -> LLMInfo:
-        has_tools = await self._check_tool_support()
-        capabilities = list(self.capabilities)
-        if has_tools:
-            if LLMCapability.TOOLS not in capabilities:
-                capabilities.append(LLMCapability.TOOLS)
-        else:
-            if LLMCapability.TOOLS in capabilities:
-                capabilities.remove(LLMCapability.TOOLS)
-        self.capabilities = capabilities
+    async def _check_vision_support(self) -> bool:
+        try:
+            response = await self.client.post("/chat/completions", json=self._vision_check_body(), is_async=True)
+            if response.status_code == 200:
+                return True
+            if self.logger:
+                self.logger.debug(f"Vision check failed with status {response.status_code}: {response.text}")
+            return False
+        except Exception as e:
+            if self.logger:
+                self.logger.debug(f"Vision check exception: {str(e)}")
+            return False
 
+    def info(self) -> LLMInfo:
         max_tokens = None
         if self.options and self.options.max_tokens:
             max_tokens = self.options.max_tokens
