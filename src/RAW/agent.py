@@ -1,9 +1,8 @@
 from typing import List, Optional, AsyncGenerator, Union, Dict, Any
-from RAW.models import Tool, LLMCapability, Message, File, FileType, Image
+from RAW.models import Tool, LLMCapability, Message, File, FileType, Image, Skill
 from RAW.llms.base import BaseLLM
 from RAW.utils import Logger, logger, Router
 import inspect
-import json
 
 class Agent:
     def __init__(
@@ -14,7 +13,8 @@ class Agent:
             llm: BaseLLM = None,
             logger: Logger = logger,
             history: List[Message] = [],
-            router: Optional[Router] = None
+            router: Optional[Router] = None,
+            skills: List[Skill] = []
         ):
         self.logger = logger
         self.name = name
@@ -28,16 +28,19 @@ class Agent:
         if LLMCapability.TOOLS not in self.llm.capabilities:
             self.logger.warning(f"The LLM assigned to the agent does not have tool usage capabilities. Tools will not be used.") 
         
-        self.system_prompt = f"""
-        You are an AI agent named {self.name}. Your role is as follows:
-        {base_prompt}
-        """
+        self.base_prompt = base_prompt
+        
+        self.system_prompt =  self._build_system_prompt() 
+
         self.messages: List[Message] = [
-            Message(role="system", content=self.system_prompt),
+            self.system_prompt,
             *history
         ]
         self.tools = tools
         self.available_tools = self.tools
+
+        self.skills: List[Skill] = skills
+        self.available_skills: List[Skill] = []
 
     async def __call__(self, user_message: str, user_files: List[File], stream: bool = False, user_summary: Optional[str] = "") -> AsyncGenerator[Union[Dict[str, Any], str], None]:
         self.logger.info(f'USER MESSAGE: {user_message}')
@@ -66,13 +69,23 @@ class Agent:
                 user_message=user_message,
                 conversation_summary="",
                 user_summary=user_summary,
-                available_tools=self.tools
+                available_tools=self.tools,
+                available_skills=self.skills
             )
             self.available_tools = [
                 tool for tool in self.tools 
                 if tool.name in routing_result['selected_tools']
             ]
-            self.logger.info(f"Router selection: {routing_result['selected_tools']}")
+            self.available_skills = [
+                skill for skill in self.skills
+                if skill.name in routing_result['selected_skills']
+            ]
+            self.logger.info(f"Router selection: {routing_result['selected_tools']}, {routing_result['selected_skills']}")
+
+        if len(self.available_skills) > 0:
+            self.system_prompt = self._build_system_prompt()
+            self.messages[0] = self.system_prompt
+            self.logger.debug(f"System prompt updated with these skills: {', '.join([skill.name for skill in self.available_skills])}")
 
         if stream:
             async for chunk in self.execute_stream():
@@ -254,3 +267,14 @@ class Agent:
             return "\n".join(str(r) for r in results)
         else:
             return tool_func(**args, **kwargs)
+
+    def _build_system_prompt(self) -> Message:
+        self.system_prompt = f"""
+        You are an AI agent named {self.name}. Your role is as follows:
+        {self.base_prompt}
+        """
+
+        for skill in self.available_skills:
+            self.system_prompt += "\n\n" + skill.build_prompt()
+
+        return Message(role="system", content=self.system_prompt)

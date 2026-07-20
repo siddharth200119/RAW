@@ -1,5 +1,5 @@
 from typing import List, Dict, Any, Optional
-from RAW.models import Tool, Message, jsonschema
+from RAW.models import Tool, Message, jsonschema, Skill
 from RAW.llms.base import BaseLLM
 from RAW.utils import Logger
 import json
@@ -26,12 +26,14 @@ class Router:
         user_message: Message,
         conversation_summary: str,
         user_summary: str,
-        available_tools: List[Tool]
+        available_tools: List[Tool],
+        available_skills: List[Skill]
     ) -> Dict[str, Any]:
         """
-        Evaluates the context and decides which tools to route the task to.
+        Evaluates the context and decides which tools and skills to route the task to.
         
-        Returns a dict with 'selected_tools' (List of tool names) and optionally 'reasoning'.
+        Returns a dict with 'selected_tools' (List of tool names), 'selected_skills'
+        (List of skill names), and 'reasoning'.
         """
         user_text = user_message.content or ""
         self.logger.debug(f"Routing request for user message: {user_text[:50]}...")
@@ -42,19 +44,37 @@ class Router:
             tool_descriptions.append(f"- {tool.name}: {tool.description}")
         tools_str = "\n".join(tool_descriptions) if tool_descriptions else "No tools available."
 
+        # Build skill descriptions
+        skill_descriptions = []
+        for skill in available_skills:
+            tags_str = ", ".join(skill.tags) if skill.tags else "none"
+            triggers_str = ", ".join(skill.triggers) if skill.triggers else "none"
+            exclusions_str = ", ".join(skill.exclusions) if skill.exclusions else "none"
+            skill_descriptions.append(
+                f"- {skill.name}: {skill.description}\n"
+                f"  Tags: {tags_str}\n"
+                f"  Triggers: {triggers_str}\n"
+                f"  Exclusions: {exclusions_str}"
+            )
+        skills_str = "\n".join(skill_descriptions) if skill_descriptions else "No skills available."
+
         system_prompt = f"""
-You are an intelligent Routing Agent. Your job is to analyze the current User Message and the context (Conversation Summary and User Summary), and decide which of the Available Tools are required to fulfill the user's request.
+You are an intelligent Routing Agent. Your job is to analyze the current User Message and the context (Conversation Summary and User Summary), and decide which of the Available Tools and Available Skills are required to fulfill the user's request.
 
 --- Available Tools ---
 {tools_str}
 
+--- Available Skills ---
+{skills_str}
+
 You must respond with a JSON object exactly matching this schema:
 {{
-    "reasoning": "A brief explanation of why you selected these tools",
-    "selected_tools": ["tool_name_1", "tool_name_2"]
+    "reasoning": "A brief explanation of why you selected these tools and skills",
+    "selected_tools": ["tool_name_1", "tool_name_2"],
+    "selected_skills": ["skill_name_1", "skill_name_2"]
 }}
 
-Only select tools that are strictly necessary to fulfill the request. If none are needed, return an empty array.
+Only select tools and skills that are strictly necessary to fulfill the request. If none are needed, return empty arrays.
 """
 
         prompt = f"""
@@ -77,9 +97,13 @@ User Message:
                 "selected_tools": {
                     "type": "array",
                     "items": {"type": "string"}
+                },
+                "selected_skills": {
+                    "type": "array",
+                    "items": {"type": "string"}
                 }
             },
-            "required": ["reasoning", "selected_tools"]
+            "required": ["reasoning", "selected_tools", "selected_skills"]
         })
 
         try:
@@ -97,11 +121,14 @@ User Message:
                 result = response
             else:
                 self.logger.error("Router did not return valid content.")
-                return {"reasoning": "Error parsing LLM response", "selected_tools": []}
+                return {"reasoning": "Error parsing LLM response", "selected_tools": [], "selected_skills": []}
 
-            self.logger.info(f"Router selection: {result.get('selected_tools', [])} tools")
+            self.logger.info(
+                f"Router selection: {result.get('selected_tools', [])} tools, "
+                f"{result.get('selected_skills', [])} skills"
+            )
             return result
                 
         except Exception as e:
             self.logger.error(f"Error during routing: {e}")
-            return {"reasoning": str(e), "selected_tools": []}
+            return {"reasoning": str(e), "selected_tools": [], "selected_skills": []}
