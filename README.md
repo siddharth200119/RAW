@@ -56,7 +56,7 @@ llm = GeminiLLM(api_key=api_key, logger=logger, model="gemini-1.5-flash")
 You can interact with the LLM using the `chat` method, which accepts a list of `Message` objects.
 
 ```python
-from RAW.modals import Message
+from RAW.models import Message
 
 messages = [
     Message(role="user", content="Hello, who are you?")
@@ -91,8 +91,8 @@ async def get_weather(location: str):
 Wrap the function in a `Tool` object, specifying its schema using `ToolParam`.
 
 ```python
-from RAW.modals import Tool
-from RAW.modals.tools import ToolParam
+from RAW.models import Tool
+from RAW.models.tools import ToolParam
 
 weather_tool = Tool(
     name="get_weather",
@@ -149,6 +149,80 @@ async for chunk in agent(user_input, stream=True):
 ### Full Example
 
 See `main.py` in the project root for a complete, runnable example of a Chatbot Agent.
+
+### 4. Storage Abstraction
+
+RAW provides a unified storage abstraction to handle files across different backends (Local, S3) without changing your application code.
+
+#### Setup
+
+```python
+from RAW.storage import LocalStorage, S3Storage
+from RAW.models import File, FileType
+import boto3
+
+# Use local storage...
+storage = LocalStorage(root="/tmp/my_app_uploads")
+
+# ...or S3 storage (AWS, MinIO, Cloudflare R2, etc.)
+# s3_client = boto3.client("s3", endpoint_url="http://localhost:9000", ...)
+# storage = S3Storage(client=s3_client, default_bucket="my-bucket")
+
+# Create a File object referencing the storage
+my_file = File(
+    name="document.pdf",
+    file_type=FileType.PDF,
+    storage=storage,
+    location="user_uploads/document.pdf"
+)
+```
+
+#### Usage
+
+```python
+# Open and read (streams automatically)
+with my_file.storage.open(my_file) as stream:
+    content = stream.read()
+
+# Save (streams automatically)
+# with open("local_file.txt", "rb") as f:
+#     my_file.storage.save(my_file, f)
+
+# Delete
+# my_file.storage.delete(my_file)
+```
+
+### 5. Metrics Protocol
+
+RAW components (like `Storage` or `BaseLLM`) optionally accept a `Metrics` instance. RAW defines a lightweight `Metrics` protocol so you can inject any metrics system (Prometheus, Datadog, etc.) without RAW taking on external dependencies.
+
+#### Defining Your Metrics Backend
+
+```python
+from RAW.metrics import Metrics
+
+class MyPrometheusMetrics:
+    # Example using prometheus_client or similar
+    def increment(self, name: str, value: float = 1.0, *, tags: dict = None) -> None:
+        print(f"Increment {name} by {value} with tags {tags}")
+        
+    def histogram(self, name: str, value: float, *, tags: dict = None) -> None:
+        print(f"Observe {name}: {value} with tags {tags}")
+        
+    def gauge(self, name: str, value: float, *, tags: dict = None) -> None:
+        print(f"Set gauge {name}: {value} with tags {tags}")
+```
+
+#### Injecting Metrics
+
+Simply pass your implementation to RAW components. They will automatically emit telemetry (e.g., operation counts, duration histograms, byte transferred counters).
+
+```python
+metrics_backend = MyPrometheusMetrics()
+
+# Now the storage backend will automatically emit metrics!
+tracked_storage = LocalStorage(root="/tmp", metrics=metrics_backend)
+```
 
 ## License
 

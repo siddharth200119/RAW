@@ -1,7 +1,7 @@
 import asyncio
 import sys
 from RAW.llms import VLLM
-from RAW.modals import Message, jsonschema, Tool, ToolParam
+from RAW.models import Message, jsonschema, Tool, ToolParam
 from RAW.utils import Logger
 
 

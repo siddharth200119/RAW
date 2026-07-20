@@ -1,7 +1,7 @@
-import RAW.modals
+import RAW.models
 
 
-def test_modals_exports():
+def test_models_exports():
     expected_exports = {
         "Image",
         "Message",
@@ -13,5 +13,5 @@ def test_modals_exports():
         "jsonschema"
     }
     for item in expected_exports:
-        assert hasattr(RAW.modals, item), f"RAW.modals is missing export: {item}"
-        assert getattr(RAW.modals, item) is not None
+        assert hasattr(RAW.models, item), f"RAW.models is missing export: {item}"
+        assert getattr(RAW.models, item) is not None

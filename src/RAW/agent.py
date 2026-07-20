@@ -1,7 +1,7 @@
 from typing import List, Optional, AsyncGenerator, Union, Dict, Any
-from RAW.modals import Tool, LLMCapability, Message
+from RAW.models import Tool, LLMCapability, Message, File, FileType
 from RAW.llms.base import BaseLLM
-from RAW.utils import Logger, logger
+from RAW.utils import Logger, logger, Router
 import inspect
 import json
 
@@ -13,12 +13,14 @@ class Agent:
             tools: List[Tool] = [], 
             llm: BaseLLM = None,
             logger: Logger = logger,
-            history: List[Message] = []
+            history: List[Message] = [],
+            router: Optional[Router] = None
         ):
         self.logger = logger
         self.name = name
         self.logger.info(f"Initializing agent: {name}")
         self.llm = llm
+        self.router = router
         
         if not self.llm:
             raise ValueError("Agent must be initialized with an LLM.")
@@ -35,12 +37,39 @@ class Agent:
             *history
         ]
         self.tools = tools
+        self.available_tools = self.tools
 
-    async def __call__(self, user_input: str, stream: bool = False) -> AsyncGenerator[Union[Dict[str, Any], str], None]:
-        self.logger.info(f'USER MESSAGE: {user_input}')
+    async def __call__(self, user_message: str, user_files: List[File], stream: bool = False, user_summary: Optional[str] = "") -> AsyncGenerator[Union[Dict[str, Any], str], None]:
+        self.logger.info(f'USER MESSAGE: {user_message}')
         
-        user_message = Message(role="user", content=user_input)
+        #logic to process files
+        for file in user_files:
+            if file.file_type == FileType.IMAGE:
+                if LLMCapability.VISION in self.llm.capabilities:
+                    # treat images as images when self.llm.capabilities has vision and pass them in the user Message
+                    pass
+                else:
+                    # if the llm does not have capabilities.vision then use document parser.
+                    pass
+            else:
+                #Simply use document parser from RAW.utils to extract the text and pass it in the user Message
+                pass
+
+        user_message = Message(role="user", content=user_message)
         self.messages.append(user_message)
+
+        if self.router:
+            routing_result = await self.router.route(
+                user_message=user_message,
+                conversation_summary="",
+                user_summary=user_summary,
+                available_tools=self.tools
+            )
+            self.available_tools = [
+                tool for tool in self.tools 
+                if tool.name in routing_result['selected_tools']
+            ]
+            self.logger.info(f"Router selection: {routing_result['selected_tools']}")
 
         if stream:
             async for chunk in self.execute_stream():
@@ -58,7 +87,7 @@ class Agent:
     async def execute_stream(self) -> AsyncGenerator[Union[Message, Dict[str, Any]], None]:
         while True:
             chat_response_generator = await self.llm.chat(
-                messages=self.messages, schema=None, stream=True, tools=self.tools
+                messages=self.messages, schema=None, stream=True, tools=self.available_tools
             )
 
             accumulated_content = ""
@@ -143,7 +172,7 @@ class Agent:
                      
     async def execute_no_stream(self) -> AsyncGenerator[Union[Message, Dict[str, Any]], None]:
         while True:
-            response: Message = await self.llm.chat(messages=self.messages, schema=None, stream=False, tools=self.tools)
+            response: Message = await self.llm.chat(messages=self.messages, schema=None, stream=False, tools=self.available_tools)
             self.messages.append(response)
             self.logger.debug(
                 f"Agent {self.name} generated response: {response.content}"

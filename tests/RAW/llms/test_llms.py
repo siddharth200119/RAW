@@ -5,7 +5,7 @@ from unittest.mock import MagicMock, AsyncMock, patch
 from RAW.llms.vllm import VLLM, VLLMOptions
 from RAW.llms.openai import OpenAILLM, OpenAIOptions
 from RAW.llms.gemini import GeminiLLM, GeminiOptions
-from RAW.modals import LLMCapability, Message, LLMInfo, jsonschema, Tool, ToolCall
+from RAW.models import LLMCapability, Message, LLMInfo, jsonschema, Tool, ToolCall
 
 
 @pytest.fixture(params=[

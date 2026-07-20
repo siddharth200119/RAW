@@ -1,5 +1,5 @@
 import pytest
-from RAW.modals.jsonschema import jsonschema
+from RAW.models.jsonschema import jsonschema
 
 
 def test_jsonschema_valid():

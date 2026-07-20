@@ -1,5 +1,5 @@
 from typing import List, Union
-from RAW.modals.message import Message
+from RAW.models.message import Message
 
 
 def count_tokens(text_or_messages: Union[str, List[Message]], model: str = "") -> int:

@@ -6,7 +6,7 @@ from pydantic import BaseModel
 from typing import List, Optional, Dict, Union, AsyncGenerator, Literal
 from .base import BaseLLM
 from RAW.utils import RequestsClient, Logger, count_tokens as count_tokens_util
-from RAW.modals import LLMCapability, Message, Image, Tool, ToolCall, LLMInfo, jsonschema
+from RAW.models import LLMCapability, Message, Image, Tool, ToolCall, LLMInfo, jsonschema
 
 
 class OpenAIOptions(BaseModel):

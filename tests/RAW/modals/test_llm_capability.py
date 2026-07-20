@@ -1,4 +1,4 @@
-from RAW.modals.llm_capability import LLMCapability
+from RAW.models.llm_capability import LLMCapability
 
 
 def test_llm_capability_enum():

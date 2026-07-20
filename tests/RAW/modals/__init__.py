@@ -1,1 +1,1 @@
-# Test suite for modals package
+# Test suite for models package

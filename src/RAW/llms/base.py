@@ -1,5 +1,5 @@
 from abc import ABC
-from RAW.modals import Message, Image, LLMInfo, jsonschema, Tool
+from RAW.models import Message, Image, LLMInfo, jsonschema, Tool
 from typing import List, Union, AsyncGenerator, Optional, Dict
 import numpy as np
 

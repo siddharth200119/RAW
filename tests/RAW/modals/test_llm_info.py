@@ -1,5 +1,5 @@
-from RAW.modals.llm_info import LLMInfo
-from RAW.modals.llm_capability import LLMCapability
+from RAW.models.llm_info import LLMInfo
+from RAW.models.llm_capability import LLMCapability
 
 
 def test_llm_info_instantiation():

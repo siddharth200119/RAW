@@ -1,7 +1,7 @@
 import pytest
 from pydantic import ValidationError
-from RAW.modals.message import Message, ToolCall
-from RAW.modals.image import Image
+from RAW.models.message import Message, ToolCall
+from RAW.models.image import Image
 import numpy as np
 
 

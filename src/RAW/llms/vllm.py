@@ -2,7 +2,7 @@ from .base import BaseLLM
 from RAW.utils import RequestsClient, Logger, count_tokens as count_tokens_util
 from pydantic import BaseModel
 from typing import List, Optional, Dict, Union, AsyncGenerator, Literal
-from RAW.modals import LLMCapability, Message, Image, Tool, ToolCall, LLMInfo, jsonschema
+from RAW.models import LLMCapability, Message, Image, Tool, ToolCall, LLMInfo, jsonschema
 import json
 import numpy as np
 import re

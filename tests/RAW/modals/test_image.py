@@ -3,7 +3,7 @@ import pytest
 import cv2
 import base64
 from pathlib import Path
-from RAW.modals.image import Image
+from RAW.models.image import Image
 
 
 def test_image_from_array():

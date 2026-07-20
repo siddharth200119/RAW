@@ -1,5 +1,5 @@
 import pytest
-from RAW.modals.tools import Tool, ToolParam
+from RAW.models.tools import Tool, ToolParam
 
 
 def test_tool_param_to_property():
