@@ -1,5 +1,5 @@
 from typing import List, Optional, AsyncGenerator, Union, Dict, Any
-from RAW.models import Tool, LLMCapability, Message, File, FileType
+from RAW.models import Tool, LLMCapability, Message, File, FileType, Image
 from RAW.llms.base import BaseLLM
 from RAW.utils import Logger, logger, Router
 import inspect
@@ -41,21 +41,24 @@ class Agent:
 
     async def __call__(self, user_message: str, user_files: List[File], stream: bool = False, user_summary: Optional[str] = "") -> AsyncGenerator[Union[Dict[str, Any], str], None]:
         self.logger.info(f'USER MESSAGE: {user_message}')
-        
+        user_images = List[Image]
         #logic to process files
         for file in user_files:
             if file.file_type == FileType.IMAGE:
                 if LLMCapability.VISION in self.llm.capabilities:
-                    # treat images as images when self.llm.capabilities has vision and pass them in the user Message
-                    pass
+                    image = Image.from_file(file.download())
+                    user_images.append(image)
                 else:
                     # if the llm does not have capabilities.vision then use document parser.
                     pass
             else:
                 #Simply use document parser from RAW.utils to extract the text and pass it in the user Message
                 pass
-
-        user_message = Message(role="user", content=user_message)
+        
+        if not user_images:
+            user_message = Message(role="user", content=user_message)
+        else:
+            user_message = Message(role="user", content=user_message, images=user_images)
         self.messages.append(user_message)
 
         if self.router:
