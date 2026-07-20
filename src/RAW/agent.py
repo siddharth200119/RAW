@@ -29,6 +29,12 @@ class Agent:
             self.logger.warning(f"The LLM assigned to the agent does not have tool usage capabilities. Tools will not be used.") 
         
         self.base_prompt = base_prompt
+
+        self.tools = tools
+        self.available_tools = self.tools
+
+        self.skills: List[Skill] = skills
+        self.available_skills: List[Skill] = []
         
         self.system_prompt =  self._build_system_prompt() 
 
@@ -36,15 +42,10 @@ class Agent:
             self.system_prompt,
             *history
         ]
-        self.tools = tools
-        self.available_tools = self.tools
 
-        self.skills: List[Skill] = skills
-        self.available_skills: List[Skill] = []
-
-    async def __call__(self, user_message: str, user_files: List[File], stream: bool = False, user_summary: Optional[str] = "") -> AsyncGenerator[Union[Dict[str, Any], str], None]:
+    async def __call__(self, user_message: str, user_files: List[File] = [], stream: bool = False, user_summary: Optional[str] = "") -> AsyncGenerator[Union[Dict[str, Any], str], None]:
         self.logger.info(f'USER MESSAGE: {user_message}')
-        user_images = List[Image]
+        user_images: List[Image] = []
         #logic to process files
         for file in user_files:
             if file.file_type == FileType.IMAGE:
