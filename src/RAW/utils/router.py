@@ -33,7 +33,8 @@ class Router:
         Evaluates the context and decides which tools and skills to route the task to.
         
         Returns a dict with 'selected_tools' (List of tool names), 'selected_skills'
-        (List of skill names), and 'reasoning'.
+        (List of skill names), 'reasoning', and 'conversation_summary' (updated summary
+        incorporating the current user message).
         """
         user_text = user_message.content or ""
         self.logger.debug(f"Routing request for user message: {user_text[:50]}...")
@@ -61,6 +62,8 @@ class Router:
         system_prompt = f"""
 You are an intelligent Routing Agent. Your job is to analyze the current User Message and the context (Conversation Summary and User Summary), and decide which of the Available Tools and Available Skills are required to fulfill the user's request.
 
+You must also produce an updated Conversation Summary that incorporates the current User Message into the prior Conversation Summary. Keep it concise and focused on the ongoing intent, decisions, and relevant context.
+
 --- Available Tools ---
 {tools_str}
 
@@ -71,7 +74,8 @@ You must respond with a JSON object exactly matching this schema:
 {{
     "reasoning": "A brief explanation of why you selected these tools and skills",
     "selected_tools": ["tool_name_1", "tool_name_2"],
-    "selected_skills": ["skill_name_1", "skill_name_2"]
+    "selected_skills": ["skill_name_1", "skill_name_2"],
+    "conversation_summary": "Updated concise summary of the conversation so far"
 }}
 
 Only select tools and skills that are strictly necessary to fulfill the request. If none are needed, return empty arrays.
@@ -101,9 +105,10 @@ User Message:
                 "selected_skills": {
                     "type": "array",
                     "items": {"type": "string"}
-                }
+                },
+                "conversation_summary": {"type": "string"}
             },
-            "required": ["reasoning", "selected_tools", "selected_skills"]
+            "required": ["reasoning", "selected_tools", "selected_skills", "conversation_summary"]
         })
 
         try:
@@ -121,7 +126,12 @@ User Message:
                 result = response
             else:
                 self.logger.error("Router did not return valid content.")
-                return {"reasoning": "Error parsing LLM response", "selected_tools": [], "selected_skills": []}
+                return {
+                    "reasoning": "Error parsing LLM response",
+                    "selected_tools": [],
+                    "selected_skills": [],
+                    "conversation_summary": conversation_summary,
+                }
 
             self.logger.info(
                 f"Router selection: {result.get('selected_tools', [])} tools, "
@@ -131,4 +141,9 @@ User Message:
                 
         except Exception as e:
             self.logger.error(f"Error during routing: {e}")
-            return {"reasoning": str(e), "selected_tools": [], "selected_skills": []}
+            return {
+                "reasoning": str(e),
+                "selected_tools": [],
+                "selected_skills": [],
+                "conversation_summary": conversation_summary,
+            }

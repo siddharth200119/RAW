@@ -35,6 +35,7 @@ class Agent:
 
         self.skills: List[Skill] = skills
         self.available_skills: List[Skill] = []
+        self.conversation_summary: str = ""
         
         self.system_prompt =  self._build_system_prompt() 
 
@@ -68,7 +69,7 @@ class Agent:
         if self.router:
             routing_result = await self.router.route(
                 user_message=user_message,
-                conversation_summary="",
+                conversation_summary=self.conversation_summary,
                 user_summary=user_summary,
                 available_tools=self.tools,
                 available_skills=self.skills
@@ -81,7 +82,11 @@ class Agent:
                 skill for skill in self.skills
                 if skill.name in routing_result['selected_skills']
             ]
+            self.conversation_summary = routing_result.get(
+                "conversation_summary", self.conversation_summary
+            )
             self.logger.info(f"Router selection: {routing_result['selected_tools']}, {routing_result['selected_skills']}")
+            self.logger.debug(f"Updated conversation summary: {self.conversation_summary}")
 
         if len(self.available_skills) > 0:
             self.system_prompt = self._build_system_prompt()
@@ -143,8 +148,16 @@ class Agent:
 
                     if tool_func:
                         try:
-                            result = await self._execute_tool(tool_func, tool_call.arguments)
-                            
+                            result = None
+                            async for kind, payload in self._execute_tool(
+                                tool_func, tool_call.arguments
+                            ):
+                                if kind == "stream":
+                                    # Intermediate tool yields (e.g. full table data) → client
+                                    yield {"tool_yield": payload}
+                                else:
+                                    result = payload
+
                             tool_message = Message(
                                 role="tool",
                                 content=str(result),
@@ -207,8 +220,15 @@ class Agent:
                     tool_func = next((t.function for t in self.tools if t.name == tool_call.name), None)
                     if tool_func:
                         try:
-                            result = await self._execute_tool(tool_func, tool_call.arguments)
-                            
+                            result = None
+                            async for kind, payload in self._execute_tool(
+                                tool_func, tool_call.arguments
+                            ):
+                                if kind == "stream":
+                                    yield {"tool_yield": payload}
+                                else:
+                                    result = payload
+
                             tool_message = Message(
                                 role="tool",
                                 content=str(result),
@@ -245,29 +265,38 @@ class Agent:
             return
 
     async def _execute_tool(self, tool_func, arguments):
-        """Helper to execute tool functions with proper self/agent argument handling."""
+        """
+        Execute a tool and yield ``("stream", chunk)`` / ``("final", content)``.
+
+        For async/sync generators: every yield except the last is streamed to the
+        client; the last yield is the content sent to the LLM as the tool message.
+        For plain functions: a single ``("final", result)`` is produced.
+        """
         action_params = inspect.signature(tool_func).parameters
         pass_self = "agent" in action_params
-        
+
         args = arguments
         kwargs = {"agent": self} if pass_self else {}
-        
+
         if inspect.iscoroutinefunction(tool_func):
-            return await tool_func(**args, **kwargs)
+            result = await tool_func(**args, **kwargs)
+            yield ("final", result)
         elif inspect.isasyncgenfunction(tool_func):
-            # Collect all items from async generator
-            results = []
+            last = None
             async for res in tool_func(**args, **kwargs):
-                results.append(res)
-            return "\n".join(str(r) for r in results)
+                if last is not None:
+                    yield ("stream", last)
+                last = res
+            yield ("final", last if last is not None else "")
         elif inspect.isgeneratorfunction(tool_func):
-            # Collect all items from generator
-            results = []
+            last = None
             for res in tool_func(**args, **kwargs):
-                results.append(res)
-            return "\n".join(str(r) for r in results)
+                if last is not None:
+                    yield ("stream", last)
+                last = res
+            yield ("final", last if last is not None else "")
         else:
-            return tool_func(**args, **kwargs)
+            yield ("final", tool_func(**args, **kwargs))
 
     def _build_system_prompt(self) -> Message:
         self.system_prompt = f"""

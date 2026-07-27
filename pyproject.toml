@@ -1,6 +1,6 @@
 [project]
 name = "raw-agents"
-version = "0.2.2"
+version = "0.2.3"
 description = "A powerful and flexible LLM interface library for Gemini and other models."
 readme = "README.md"
 requires-python = ">=3.10"

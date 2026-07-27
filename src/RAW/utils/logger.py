@@ -17,6 +17,7 @@ class Logger:
         "CRITICAL": "\033[41m",  # Red background
         "RESET": "\033[0m",
     }
+    MAX_MSG_LEN = 150
 
     def __init__(self, service_name: str, level: int = logging.INFO):
         self.service_name = service_name
@@ -31,6 +32,12 @@ class Logger:
 
         self._logger.handlers.clear()
         self._logger.addHandler(handler)
+
+    @staticmethod
+    def _truncate(msg: str) -> str:
+        if len(msg) <= Logger.MAX_MSG_LEN:
+            return msg
+        return msg[: Logger.MAX_MSG_LEN] + "..."
 
     def _formatter(self):
         if self.is_tty:
@@ -51,7 +58,7 @@ class Logger:
                     f"{datetime.now().strftime('%Y-%m-%d %H:%M:%S')} | "
                     f"{record.levelname:<8} | "
                     f"{record.name} | "
-                    f"{record.getMessage()}"
+                    f"{Logger._truncate(record.getMessage())}"
                     f"{tracker_part}"
                     f"{reset}"
                 )
@@ -67,7 +74,7 @@ class Logger:
                         + "Z",
                         "level": record.levelname,
                         "service_name": record.name,
-                        "message": record.getMessage(),
+                        "message": Logger._truncate(record.getMessage()),
                         "tracker_id": _tracker_id.get(),
                     }
                 )
