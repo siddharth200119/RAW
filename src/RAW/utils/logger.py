@@ -1,6 +1,7 @@
-import logging
-import sys
 import json
+import logging
+import os
+import sys
 from datetime import datetime
 from contextvars import ContextVar
 from typing import Optional
@@ -17,11 +18,14 @@ class Logger:
         "CRITICAL": "\033[41m",  # Red background
         "RESET": "\033[0m",
     }
-    MAX_MSG_LEN = 150
+    DEFAULT_MAX_MSG_LEN = 150
 
     def __init__(self, service_name: str, level: int = logging.INFO):
         self.service_name = service_name
         self.is_tty = sys.stdout.isatty()
+        self.max_msg_len = int(
+            os.getenv("RAW_LOG_MAX_MSG_LEN", str(self.DEFAULT_MAX_MSG_LEN))
+        )
 
         self._logger = logging.getLogger(service_name)
         self._logger.setLevel(level)
@@ -33,11 +37,10 @@ class Logger:
         self._logger.handlers.clear()
         self._logger.addHandler(handler)
 
-    @staticmethod
-    def _truncate(msg: str) -> str:
-        if len(msg) <= Logger.MAX_MSG_LEN:
+    def _truncate(self, msg: str) -> str:
+        if len(msg) <= self.max_msg_len:
             return msg
-        return msg[: Logger.MAX_MSG_LEN] + "..."
+        return msg[: self.max_msg_len] + "..."
 
     def _formatter(self):
         if self.is_tty:
@@ -45,6 +48,8 @@ class Logger:
         return self._json_formatter()
 
     def _colored_formatter(self):
+        logger_instance = self
+
         class ColoredFormatter(logging.Formatter):
             def format(self, record: logging.LogRecord) -> str:
                 color = Logger.COLORS.get(record.levelname, "")
@@ -58,7 +63,7 @@ class Logger:
                     f"{datetime.now().strftime('%Y-%m-%d %H:%M:%S')} | "
                     f"{record.levelname:<8} | "
                     f"{record.name} | "
-                    f"{Logger._truncate(record.getMessage())}"
+                    f"{logger_instance._truncate(record.getMessage())}"
                     f"{tracker_part}"
                     f"{reset}"
                 )
@@ -66,6 +71,8 @@ class Logger:
         return ColoredFormatter()
 
     def _json_formatter(self):
+        logger_instance = self
+
         class JsonFormatter(logging.Formatter):
             def format(self, record: logging.LogRecord) -> str:
                 return json.dumps(
@@ -74,7 +81,7 @@ class Logger:
                         + "Z",
                         "level": record.levelname,
                         "service_name": record.name,
-                        "message": Logger._truncate(record.getMessage()),
+                        "message": logger_instance._truncate(record.getMessage()),
                         "tracker_id": _tracker_id.get(),
                     }
                 )
