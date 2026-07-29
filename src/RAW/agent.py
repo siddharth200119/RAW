@@ -30,11 +30,18 @@ class Agent:
         
         self.base_prompt = base_prompt
 
-        self.tools = tools
-        self.available_tools = self.tools
-
+        self.tools: List[Tool] = tools
         self.skills: List[Skill] = skills
-        self.available_skills: List[Skill] = []
+        # Without a router, default to every skill and every tool (agent + skill tools).
+        if self.router is None:
+            self.available_skills = list(self.skills)
+            self.available_tools = self._merge_tools(
+                self.tools, self._tools_from_skills(self.skills)
+            )
+        else:
+            self.available_skills = []
+            self.available_tools = list(self.tools)
+
         self.conversation_summary: str = ""
         
         self.system_prompt =  self._build_system_prompt() 
@@ -44,7 +51,22 @@ class Agent:
             *history
         ]
 
-    async def __call__(self, user_message: str, user_files: List[File] = [], stream: bool = False, user_summary: Optional[str] = "") -> AsyncGenerator[Union[Dict[str, Any], str], None]:
+        self.logger.info(
+            f"""
+            Agent {self.name} initialized with:
+            - Tools: {[t.name for t in self.tools]}
+            - Skills: {[s.name for s in self.skills]}
+            """
+        )
+
+    async def __call__(
+            self,
+            user_message: str,
+            user_files: List[File] = [],
+            stream: bool = False,
+            user_summary: Optional[str] = "",
+            skill: Optional[Skill] = None,
+        ) -> AsyncGenerator[Union[Dict[str, Any], str], None]:
         self.logger.info(f'USER MESSAGE: {user_message}')
         user_images: List[Image] = []
         #logic to process files
@@ -66,7 +88,14 @@ class Agent:
             user_message = Message(role="user", content=user_message, images=user_images)
         self.messages.append(user_message)
 
-        if self.router:
+        if skill is not None:
+            self.available_skills = [skill]
+            self.available_tools = self._merge_tools(skill.tools)
+            self.logger.info(
+                f"Skill override: {skill.name} "
+                f"(tools: {[t.name for t in self.available_tools]})"
+            )
+        elif self.router:
             routing_result = await self.router.route(
                 user_message=user_message,
                 conversation_summary=self.conversation_summary,
@@ -74,25 +103,43 @@ class Agent:
                 available_tools=self.tools,
                 available_skills=self.skills
             )
-            self.available_tools = [
-                tool for tool in self.tools 
+            self.available_skills = [
+                s for s in self.skills
+                if s.name in routing_result['selected_skills']
+            ]
+            selected_tools = [
+                tool for tool in self.tools
                 if tool.name in routing_result['selected_tools']
             ]
-            self.available_skills = [
-                skill for skill in self.skills
-                if skill.name in routing_result['selected_skills']
-            ]
+            # Selected skills automatically bring their associated tools.
+            self.available_tools = self._merge_tools(
+                selected_tools, self._tools_from_skills(self.available_skills)
+            )
             self.conversation_summary = routing_result.get(
                 "conversation_summary", self.conversation_summary
             )
-            self.logger.info(f"Router selection: {routing_result['selected_tools']}, {routing_result['selected_skills']}")
+            self.logger.info(
+                f"Router selection: tools={[t.name for t in self.available_tools]}, "
+                f"skills={[s.name for s in self.available_skills]}"
+            )
             self.logger.debug(f"Updated conversation summary: {self.conversation_summary}")
+        else:
+            self.available_skills = list(self.skills)
+            self.available_tools = self._merge_tools(
+                self.tools, self._tools_from_skills(self.skills)
+            )
+            self.logger.debug(
+                f"No router: using all skills {[s.name for s in self.available_skills]} "
+                f"and tools {[t.name for t in self.available_tools]}"
+            )
 
-        if len(self.available_skills) > 0:
-            self.system_prompt = self._build_system_prompt()
-            self.messages[0] = self.system_prompt
-            self.logger.debug(f"System prompt updated with these skills: {', '.join([skill.name for skill in self.available_skills])}")
-
+        self.system_prompt = self._build_system_prompt()
+        self.messages[0] = self.system_prompt
+        if self.available_skills:
+            self.logger.debug(
+                f"System prompt updated with these skills: "
+                f"{', '.join(s.name for s in self.available_skills)}"
+            )
         if stream:
             async for chunk in self.execute_stream():
                 if isinstance(chunk, Message):
@@ -144,7 +191,7 @@ class Agent:
                         "tool_call": tool_call.name,
                         "arguments": tool_call.arguments
                     }
-                    tool_func = next((t.function for t in self.tools if t.name == tool_call.name), None)
+                    tool_func = self._lookup_tool(tool_call.name)
 
                     if tool_func:
                         try:
@@ -217,7 +264,7 @@ class Agent:
                     self.logger.info(
                         msg=f"Tool Called: {tool_call.name} with arguments {tool_call.arguments}"
                     )
-                    tool_func = next((t.function for t in self.tools if t.name == tool_call.name), None)
+                    tool_func = self._lookup_tool(tool_call.name)
                     if tool_func:
                         try:
                             result = None
@@ -297,6 +344,31 @@ class Agent:
             yield ("final", last if last is not None else "")
         else:
             yield ("final", tool_func(**args, **kwargs))
+
+    def _merge_tools(self, *tool_lists: List[Tool]) -> List[Tool]:
+        seen = set()
+        merged: List[Tool] = []
+        for tools in tool_lists:
+            for tool in tools:
+                if tool.name not in seen:
+                    seen.add(tool.name)
+                    merged.append(tool)
+        return merged
+
+    def _tools_from_skills(self, skills: List[Skill]) -> List[Tool]:
+        tools: List[Tool] = []
+        for skill in skills:
+            tools.extend(skill.tools)
+        return tools
+
+    def _lookup_tool(self, name: str):
+        catalog = self._merge_tools(
+            self.available_tools,
+            self.tools,
+            self._tools_from_skills(self.skills),
+        )
+        tool = next((t for t in catalog if t.name == name), None)
+        return tool.function if tool else None
 
     def _build_system_prompt(self) -> Message:
         self.system_prompt = f"""
