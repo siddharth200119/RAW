@@ -1,5 +1,6 @@
 from .image import Image
 from .message import Message, ToolCall
+from .usage import Usage
 from .tools import Tool, ToolParam
 from .llm_capability import LLMCapability
 from .llm_info import LLMInfo
@@ -11,6 +12,7 @@ __all__ = [
     Image, 
     Message, 
     ToolCall, 
+    Usage, 
     Tool, 
     ToolParam, 
     LLMCapability, 
