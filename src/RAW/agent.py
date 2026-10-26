@@ -1,5 +1,5 @@
 from typing import List, Optional, AsyncGenerator, Union, Dict, Any
-from RAW.models import Tool, LLMCapability, Message, File, FileType, Image, Skill
+from RAW.models import Tool, LLMCapability, Message, File, FileType, Image, Skill, Usage
 from RAW.llms.base import BaseLLM
 from RAW.utils import Logger, logger, Router
 import inspect
@@ -14,10 +14,16 @@ class Agent:
             logger: Logger = logger,
             history: List[Message] = [],
             router: Optional[Router] = None,
-            skills: List[Skill] = []
+            skills: List[Skill] = [],
+            max_iterations: int = 25
         ):
         self.logger = logger
         self.name = name
+        # Max LLM calls per __call__; guards against endless tool-call loops.
+        self.max_iterations = max_iterations
+        # Token usage summed over every LLM call this agent made / made in the last run.
+        self.usage = Usage()
+        self.last_run_usage = Usage()
         self.logger.info(f"Initializing agent: {name}")
         self.llm = llm
         self.router = router
@@ -68,6 +74,7 @@ class Agent:
             skill: Optional[Skill] = None,
         ) -> AsyncGenerator[Union[Dict[str, Any], str], None]:
         self.logger.info(f'USER MESSAGE: {user_message}')
+        self.last_run_usage = Usage()
         user_images: List[Image] = []
         #logic to process files
         for file in user_files:
@@ -154,7 +161,13 @@ class Agent:
                     yield {"agent_name": self.name, 'content': chunk}
 
     async def execute_stream(self) -> AsyncGenerator[Union[Message, Dict[str, Any]], None]:
+        iterations = 0
         while True:
+            if iterations >= self.max_iterations:
+                yield self._max_iterations_reached()
+                return
+            iterations += 1
+
             chat_response_generator = await self.llm.chat(
                 messages=self.messages, schema=None, stream=True, tools=self.available_tools
             )
@@ -162,11 +175,17 @@ class Agent:
             accumulated_content = ""
             final_message = None
             has_tool_calls = False
+            # Content-less message carrying usage / raw provider blocks (end of stream).
+            metadata_message = None
 
             async for response in chat_response_generator:
+                if response.usage:
+                    self._add_usage(response.usage)
                 if hasattr(response, "tool_calls") and response.tool_calls:
                     has_tool_calls = True
                     final_message = response
+                elif not response.content:
+                    metadata_message = response
                 elif response.content:
                     accumulated_content += response.content
                     yield Message(
@@ -228,6 +247,9 @@ class Agent:
                                 f"Error executing tool {tool_call.name}: {e}"
                             )
                             yield {"tool_response": error_msg}
+                    else:
+                        # Every tool call needs a result, or the next request is rejected.
+                        yield self._unknown_tool_result(tool_call)
                 continue
 
             elif accumulated_content:
@@ -237,6 +259,12 @@ class Agent:
                     tool_calls=[],
                     images=[]
                 )
+                if metadata_message:
+                    complete_message.usage = metadata_message.usage
+                    complete_message.think_content = metadata_message.think_content
+                    complete_message.provider_content = metadata_message.provider_content
+                    complete_message.provider = metadata_message.provider
+                    complete_message.citations = metadata_message.citations
                 self.messages.append(complete_message)
                 self.logger.info(
                     f"{self.name}: {complete_message.content}"
@@ -248,8 +276,16 @@ class Agent:
             return
                      
     async def execute_no_stream(self) -> AsyncGenerator[Union[Message, Dict[str, Any]], None]:
+        iterations = 0
         while True:
+            if iterations >= self.max_iterations:
+                yield self._max_iterations_reached()
+                return
+            iterations += 1
+
             response: Message = await self.llm.chat(messages=self.messages, schema=None, stream=False, tools=self.available_tools)
+            if response.usage:
+                self._add_usage(response.usage)
             self.messages.append(response)
             self.logger.debug(
                 f"Agent {self.name} generated response: {response.content}"
@@ -299,6 +335,9 @@ class Agent:
                                 f"Error executing tool {tool_call.name}: {e}"
                             )
                             yield {"tool_response": error_msg}
+                    else:
+                        # Every tool call needs a result, or the next request is rejected.
+                        yield self._unknown_tool_result(tool_call)
                 continue
             if response.content:
                 self.logger.info(
@@ -310,6 +349,30 @@ class Agent:
             # If no tool calls and no content, break loop
             self.logger.warning(f"Agent {self.name} received empty response from LLM. Stopping.")
             return
+
+    def _add_usage(self, usage: Usage) -> None:
+        self.usage = self.usage + usage
+        self.last_run_usage = self.last_run_usage + usage
+
+    def _max_iterations_reached(self) -> Dict[str, Any]:
+        self.logger.warning(
+            f"Agent {self.name} reached max_iterations ({self.max_iterations}). Stopping."
+        )
+        return {
+            "error": "max_iterations_reached",
+            "max_iterations": self.max_iterations,
+            "message": f"Agent {self.name} stopped after {self.max_iterations} LLM calls without a final answer.",
+        }
+
+    def _unknown_tool_result(self, tool_call) -> Dict[str, Any]:
+        error_msg = f"Error calling tool: tool '{tool_call.name}' is not available."
+        self.messages.append(Message(
+            role="tool",
+            content=error_msg,
+            tool_call_id=tool_call.id
+        ))
+        self.logger.error(f"Tool not found: {tool_call.name}")
+        return {"tool_response": error_msg}
 
     async def _execute_tool(self, tool_func, arguments):
         """
