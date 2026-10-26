@@ -3,7 +3,7 @@ from .base import BaseLLM
 from RAW.utils import RequestsClient, Logger, count_tokens as count_tokens_util
 from pydantic import BaseModel
 from typing import List, Optional, Dict, Union, AsyncGenerator, Literal
-from RAW.models import Message, Image, Tool, ToolCall, LLMCapability, LLMInfo, jsonschema
+from RAW.models import Message, Image, Tool, ToolCall, LLMCapability, LLMInfo, Usage, jsonschema
 import httpx
 import json
 import numpy as np
@@ -318,11 +318,21 @@ class GeminiLLM(BaseLLM):
                         )
                         tool_calls.append(tool_call)
                 
+                usage_meta = data.get("usageMetadata") or {}
+                cached = usage_meta.get("cachedContentTokenCount")
+                prompt_tokens = usage_meta.get("promptTokenCount")
+                if prompt_tokens is not None and cached:
+                    prompt_tokens -= cached
                 return Message(
                     role="assistant",
                     content=content,
                     images=[],
-                    tool_calls=tool_calls
+                    tool_calls=tool_calls,
+                    usage=Usage(
+                        input_tokens=prompt_tokens,
+                        output_tokens=usage_meta.get("candidatesTokenCount"),
+                        cache_read_tokens=cached,
+                    ) if usage_meta else None
                 )
             else:
                 raise RuntimeError("No candidates in response")

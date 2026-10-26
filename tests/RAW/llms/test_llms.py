@@ -150,7 +150,10 @@ async def test_llm_generate_direct(llm_provider_setup):
             assert call_args["json"]["generationConfig"]["responseMimeType"] == "application/json"
             assert call_args["json"]["generationConfig"]["responseSchema"] == dict(schema)
         else:
-            assert call_args["json"]["response_format"] == {"type": "json_object"}
+            assert call_args["json"]["response_format"] == {
+                "type": "json_schema",
+                "json_schema": {"name": "response", "schema": dict(schema)}
+            }
             assert "json schema" in call_args["json"]["messages"][0]["content"][0]["text"]
 
 

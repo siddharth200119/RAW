@@ -1,8 +1,10 @@
 from .base import BaseLLM
+from .openai import NON_BODY_OPTIONS, build_response_format, iter_sse_data
 from RAW.utils import RequestsClient, Logger, count_tokens as count_tokens_util
 from pydantic import BaseModel
-from typing import List, Optional, Dict, Union, AsyncGenerator, Literal
-from RAW.models import LLMCapability, Message, Image, Tool, ToolCall, LLMInfo, jsonschema
+from typing import Any, List, Optional, Dict, Union, AsyncGenerator, Literal
+from RAW.models import LLMCapability, Message, Image, Tool, ToolCall, LLMInfo, Usage, jsonschema
+import codecs
 import json
 import numpy as np
 import re
@@ -13,6 +15,11 @@ class VLLMOptions(BaseModel):
     top_p: Optional[float] = None
     max_tokens: Optional[int] = None
     stop: Optional[List[str]] = None
+    # Raw provider tool dicts appended to `tools` as-is (not executed by RAW).
+    native_tools: List[Dict[str, Any]] = []
+    # "json_schema" uses vLLM guided decoding on the schema; "json_object" is the
+    # older JSON mode for servers that don't support json_schema.
+    structured_output: Literal["json_schema", "json_object"] = "json_schema"
 
 
 _Role = Literal["user", "assistant", "system", "tool"]
@@ -93,7 +100,8 @@ class VLLM(BaseLLM):
 
     async def generate(self, prompt: str, images: Optional[List[Image]] = None, schema: Optional[jsonschema] = None, stream: bool = False) -> Union[str, Dict, AsyncGenerator[Union[str, Dict], None]]:
         if not prompt:
-            self.logger.warning("Prompt is empty.")
+            if self.logger:
+                self.logger.warning("Prompt is empty.")
         
         body = {
             "model": self.model,
@@ -102,7 +110,7 @@ class VLLM(BaseLLM):
         }
         
         if self.options:
-            body.update(self.options.model_dump(exclude_none=True))
+            body.update(self.options.model_dump(exclude_none=True, exclude=NON_BODY_OPTIONS))
         
         if LLMCapability.VISION in self.capabilities and images:
             body["messages"][0]["content"] = [
@@ -128,9 +136,7 @@ class VLLM(BaseLLM):
                 body["messages"][0]["content"][0]["text"] += f"\n\nGive the output as per this json schema: {schema}"
 
         if schema:
-            body["response_format"] = {
-                "type": "json_object"
-            }
+            body["response_format"] = build_response_format(schema, self._options().structured_output)
 
         if stream:
             return self._stream_response(body)
@@ -224,9 +230,13 @@ class VLLM(BaseLLM):
             ]
         return msg_dict
 
-    async def chat(self, messages: Optional[List[Message]] = None, schema: Optional[str] = None, stream: bool = False, tools: Optional[List[Tool]] = None) -> Union[Message, AsyncGenerator[Message, None]]:
+    def _options(self) -> VLLMOptions:
+        return self.options or VLLMOptions()
+
+    async def chat(self, messages: Optional[List[Message]] = None, schema: Optional[str] = None, stream: bool = False, tools: Optional[List[Tool]] = None, native_tools: Optional[List[Dict]] = None) -> Union[Message, AsyncGenerator[Message, None]]:
         if not messages:
-            self.logger.warning("Messages list is empty.")
+            if self.logger:
+                self.logger.warning("Messages list is empty.")
             messages = []
         
         body = {
@@ -238,13 +248,20 @@ class VLLM(BaseLLM):
         if tools and LLMCapability.TOOLS in self.capabilities:
             body["tools"] = [tool.to_dict() for tool in tools]
 
+        # Provider-native tool dicts are passed through untouched.
+        extra_tools = list(self._options().native_tools) + list(native_tools or [])
+        if extra_tools:
+            body["tools"] = body.get("tools", []) + extra_tools
+
         if schema:
-            body["response_format"] = {"type": "json_object"}
+            body["response_format"] = build_response_format(schema, self._options().structured_output)
 
         if self.options:
-            body.update(self.options.model_dump(exclude_none=True))
-        
+            body.update(self.options.model_dump(exclude_none=True, exclude=NON_BODY_OPTIONS))
+
         if stream:
+            # Ask for a final usage chunk.
+            body["stream_options"] = {"include_usage": True}
             return self._stream_chat_response(body)
         else:
             return await self._get_direct_chat_response(body)
@@ -268,26 +285,28 @@ class VLLM(BaseLLM):
                 role="assistant",
                 content=message_data.get("content"),
                 images=[],
-                tool_calls=tool_calls
+                tool_calls=tool_calls,
+                usage=Usage.from_openai(data.get("usage"))
             )
         except Exception as e:
-            self.logger.error(f"Chat error: {str(e)}")
+            if self.logger:
+                self.logger.error(f"Chat error: {str(e)}")
             raise RuntimeError(f"Chat error: {str(e)}")
 
     async def _stream_chat_response(self, body: Dict) -> AsyncGenerator[Message, None]:
         tool_call_chunks = {}
         has_tool_calls = False
+        usage = None
                 
         try:
             stream_gen = await self.client.post("/chat/completions", json=body, stream=True, is_async=True)
+            buffer = ""
+            decoder = codecs.getincrementaldecoder("utf-8")()
             async for chunk in stream_gen:
-                lines = chunk.decode("utf-8").strip().split('\n')
-                for line in lines:
-                    line = line.strip()
-                    if not line.startswith("data: "):
-                        continue
-                    
-                    data_str = line[6:]
+                # Buffer so an SSE line (or a UTF-8 char) split across network chunks is not dropped.
+                buffer += decoder.decode(chunk)
+                payloads, buffer = iter_sse_data(buffer)
+                for data_str in payloads:
                     if data_str == "[DONE]":
                         break
                     
@@ -295,6 +314,9 @@ class VLLM(BaseLLM):
                         data = json.loads(data_str)
                     except:
                         continue
+
+                    if data.get("usage"):
+                        usage = Usage.from_openai(data["usage"])
                     
                     if "choices" in data and data["choices"]:
                         choice = data["choices"][0]
@@ -329,10 +351,14 @@ class VLLM(BaseLLM):
                         args = {}
                     tool_calls.append(ToolCall(id=tc["id"], name=tc["name"], arguments=args))
                 
-                yield Message(role="assistant", content=None, images=[], tool_calls=tool_calls)
+                yield Message(role="assistant", content=None, images=[], tool_calls=tool_calls, usage=usage)
+            elif usage:
+                # Usage-only final message (no content, no tool calls).
+                yield Message(role="assistant", content=None, images=[], tool_calls=[], usage=usage)
                                 
         except Exception as e:
-            self.logger.error(f"Streaming error: {str(e)}")
+            if self.logger:
+                self.logger.error(f"Streaming error: {str(e)}")
             raise RuntimeError(f"Streaming error: {str(e)}")
     
     def _tool_check_body(self) -> Dict:
