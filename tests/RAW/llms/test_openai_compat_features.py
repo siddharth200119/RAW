@@ -14,7 +14,8 @@ SCHEMA = jsonschema({"title": "Router Output", "type": "object", "properties": {
 def _vllm(options=None):
     def fake_init(self):
         self.capabilities = [LLMCapability.COMPLETION, LLMCapability.CHAT, LLMCapability.TOOLS]
-    with patch.object(VLLM, "_initialize_capabilities", fake_init):
+    with patch.object(VLLM, "_initialize_capabilities", fake_init), \
+            patch.object(VLLM, "_fetch_context_window", return_value=None):
         return VLLM(base_url="http://127.0.0.1:8000", options=options)
 
 

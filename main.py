@@ -1,5 +1,4 @@
 import asyncio
-import sys
 from RAW.llms import VLLM
 from RAW.models import Message, jsonschema, Tool, ToolParam
 from RAW.utils import Logger
@@ -8,7 +7,7 @@ from RAW.utils import Logger
 async def run_info(llm):
     print("\n--- Testing info() ---")
     try:
-        info = await llm.info()
+        info = llm.info()
         print(f"Model Name: {info.model_name}")
         print(f"Provider: {info.provider}")
         print(f"Max Tokens: {info.max_tokens}")
@@ -160,7 +159,7 @@ async def main():
             # Ensure we close connections
             try:
                 await llm.stop()
-            except:
+            except Exception:
                 pass
             break
         elif choice in menu:

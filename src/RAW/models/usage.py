@@ -14,6 +14,8 @@ class Usage(BaseModel):
     output_tokens: Optional[int] = None
     cache_read_tokens: Optional[int] = None
     cache_write_tokens: Optional[int] = None
+    # USD cost, when the provider reports it (e.g. OpenRouter Decisions).
+    cost: Optional[float] = None
 
     def __add__(self, other: "Usage") -> "Usage":
         def _sum(a: Optional[int], b: Optional[int]) -> Optional[int]:
@@ -26,6 +28,7 @@ class Usage(BaseModel):
             output_tokens=_sum(self.output_tokens, other.output_tokens),
             cache_read_tokens=_sum(self.cache_read_tokens, other.cache_read_tokens),
             cache_write_tokens=_sum(self.cache_write_tokens, other.cache_write_tokens),
+            cost=None if self.cost is None and other.cost is None else (self.cost or 0.0) + (other.cost or 0.0),
         )
 
     @classmethod

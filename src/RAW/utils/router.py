@@ -1,25 +1,40 @@
-from typing import List, Dict, Any, Optional
-from RAW.models import Tool, Message, jsonschema, Skill
-from RAW.llms.base import BaseLLM
-from RAW.utils import Logger
+from typing import TYPE_CHECKING, List, Dict, Any, Optional
+from RAW.models import Tool, Message, jsonschema, Skill, NoulQuestion, NoulCriteria, NoulAnswer
+from RAW.utils.logger import Logger
 import json
+
+if TYPE_CHECKING:
+    # Type-only: importing RAW.llms pulls in the [agentic] extra.
+    from RAW.llms.base import BaseLLM
+    from RAW.deciders.base import BaseDecider
 
 class Router:
     """
-    A Router class that takes an LLM on initialization and exposes a route() method.
+    A Router that takes either an LLM or a decision model and exposes a route() method.
     It evaluates the user message, conversation summary, user summary, and available tools/skills,
     and returns a selection of which tools and skills are appropriate for the context.
+
+    With an LLM, one structured-output call selects tools/skills and updates the
+    conversation summary. With a decider, each tool and skill gets a yes/no (Noul)
+    question and is selected when its probability is at least ``decider_threshold``.
+    Decision models return no text, so the conversation summary is passed through unchanged.
     """
     def __init__(
         self,
-        llm: BaseLLM,
+        llm: Optional["BaseLLM"] = None,
         logger: Optional[Logger] = None,
+        decider: Optional["BaseDecider"] = None,
+        decider_threshold: float = 0.5,
     ):
+        if (llm is None) == (decider is None):
+            raise ValueError("Router must be initialized with exactly one of an LLM or a decider.")
+        if not 0.0 <= decider_threshold <= 1.0:
+            raise ValueError("decider_threshold must be between 0 and 1.")
+
         self.llm = llm
+        self.decider = decider
+        self.decider_threshold = decider_threshold
         self.logger = logger or Logger(service_name="Router")
-        
-        if not self.llm:
-            raise ValueError("Router must be initialized with an LLM.")
 
     async def route(
         self,
@@ -34,8 +49,104 @@ class Router:
         
         Returns a dict with 'selected_tools' (List of tool names), 'selected_skills'
         (List of skill names), 'reasoning', and 'conversation_summary' (updated summary
-        incorporating the current user message).
+        incorporating the current user message; unchanged when routing with a decider).
+        Decider routing also returns 'probabilities' ({'tools': {...}, 'skills': {...}}).
         """
+        if self.decider is not None:
+            return await self._route_with_decider(
+                self.decider, user_message, conversation_summary, user_summary, available_tools, available_skills
+            )
+        assert self.llm is not None
+        return await self._route_with_llm(
+            self.llm, user_message, conversation_summary, user_summary, available_tools, available_skills
+        )
+
+    async def _route_with_decider(
+        self,
+        decider: "BaseDecider",
+        user_message: Message,
+        conversation_summary: str,
+        user_summary: str,
+        available_tools: List[Tool],
+        available_skills: List[Skill]
+    ) -> Dict[str, Any]:
+        user_text = user_message.content or ""
+        self.logger.debug(f"Routing request with decider for user message: {user_text[:50]}...")
+
+        # Question names are positional so tool/skill names never need escaping.
+        questions: Dict[str, NoulQuestion] = {}
+        for i, tool in enumerate(available_tools):
+            questions[f"tool_{i}"] = NoulQuestion(
+                instructions=f"Is the tool `{tool.name}` needed to fulfil the user's message?",
+                criteria=NoulCriteria(
+                    true=f"The request needs what this tool does: {tool.description}",
+                    false="The request can be fulfilled without this tool.",
+                ),
+            )
+        for i, skill in enumerate(available_skills):
+            true = f"The request matches this skill: {skill.description}"
+            if skill.triggers:
+                true += f" Triggers: {', '.join(skill.triggers)}."
+            false = "The request is unrelated to this skill."
+            if skill.exclusions:
+                false += f" Also no when it involves: {', '.join(skill.exclusions)}."
+            questions[f"skill_{i}"] = NoulQuestion(
+                instructions=f"Should the skill `{skill.name}` be used for the user's message?",
+                criteria=NoulCriteria(true=true, false=false),
+            )
+
+        result: Dict[str, Any] = {
+            "reasoning": "",
+            "selected_tools": [],
+            "selected_skills": [],
+            "conversation_summary": conversation_summary,
+            "probabilities": {"tools": {}, "skills": {}},
+        }
+        if not questions:
+            result["reasoning"] = "No tools or skills available."
+            return result
+
+        state = {
+            "user_message": user_text,
+            "conversation_summary": conversation_summary,
+            "user_summary": user_summary,
+        }
+        try:
+            decision = await decider.decide(state=state, questions=questions)
+        except Exception as e:
+            self.logger.error(f"Error during routing: {e}")
+            result["reasoning"] = str(e)
+            return result
+
+        names = {"tools": [t.name for t in available_tools], "skills": [s.name for s in available_skills]}
+        for kind, kind_names in names.items():
+            for i, name in enumerate(kind_names):
+                answer = decision.answers.get(f"{kind[:-1]}_{i}")
+                if not isinstance(answer, NoulAnswer):
+                    self.logger.warning(f"Decider returned no yes/no answer for {kind[:-1]} '{name}'.")
+                    continue
+                result["probabilities"][kind][name] = answer.noul
+                if answer.noul >= self.decider_threshold:
+                    result[f"selected_{kind}"].append(name)
+
+        result["reasoning"] = (
+            f"Selected by decider {decider.model} at threshold {self.decider_threshold}."
+        )
+        self.logger.info(
+            f"Router selection: {result['selected_tools']} tools, "
+            f"{result['selected_skills']} skills"
+        )
+        return result
+
+    async def _route_with_llm(
+        self,
+        llm: "BaseLLM",
+        user_message: Message,
+        conversation_summary: str,
+        user_summary: str,
+        available_tools: List[Tool],
+        available_skills: List[Skill]
+    ) -> Dict[str, Any]:
         user_text = user_message.content or ""
         self.logger.debug(f"Routing request for user message: {user_text[:50]}...")
         
@@ -113,7 +224,7 @@ User Message:
 
         try:
             # We use generate with a jsonschema to ensure structured JSON output
-            response = await self.llm.generate(
+            response = await llm.generate(
                 prompt=prompt,
                 schema=schema,
                 stream=False

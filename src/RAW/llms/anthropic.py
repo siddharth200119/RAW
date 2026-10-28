@@ -574,5 +574,5 @@ class AnthropicLLM(BaseLLM):
     def __del__(self):
         try:
             self.client.close()
-        except:
+        except Exception:
             pass

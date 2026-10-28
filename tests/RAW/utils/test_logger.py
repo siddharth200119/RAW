@@ -2,7 +2,6 @@ import sys
 import json
 import logging
 from unittest.mock import patch
-import pytest
 from RAW.utils.logger import Logger
 
 

@@ -417,7 +417,7 @@ class GeminiLLM(BaseLLM):
         """Embedding is not supported by GeminiLLM"""
         raise NotImplementedError("GeminiLLM does not support embedding.")
 
-    async def info(self) -> LLMInfo:
+    def info(self) -> LLMInfo:
         """Get information about the LLM."""
         max_tokens = self.options.max_output_tokens if self.options else None
         return LLMInfo(

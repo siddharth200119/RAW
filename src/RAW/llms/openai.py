@@ -167,7 +167,7 @@ class OpenAILLM(BaseLLM):
                         content = data["choices"][0]["delta"].get("content", "")
                         if content:
                             yield content
-                    except:
+                    except Exception:
                         pass
                     
                     buffer = b"data: " + parts[2]
@@ -180,7 +180,7 @@ class OpenAILLM(BaseLLM):
                         content = data["choices"][0]["delta"].get("content", "")
                         if content:
                             yield content
-                    except:
+                    except Exception:
                         pass
 
         except Exception as e:
@@ -299,7 +299,7 @@ class OpenAILLM(BaseLLM):
                     
                     try:
                         data = json.loads(data_str)
-                    except:
+                    except Exception:
                         continue
 
                     if data.get("usage"):
@@ -333,7 +333,7 @@ class OpenAILLM(BaseLLM):
                     tc = tool_call_chunks[idx]
                     try:
                         args = json.loads(tc["arguments"])
-                    except:
+                    except Exception:
                         args = {}
                     tool_calls.append(ToolCall(id=tc["id"], name=tc["name"], arguments=args))
                 
@@ -347,50 +347,7 @@ class OpenAILLM(BaseLLM):
                 self.logger.error(f"Streaming error: {str(e)}")
             raise RuntimeError(f"Streaming error: {str(e)}")
 
-    async def _check_tool_support(self) -> bool:
-        body = {
-            "model": self.model,
-            "messages": [{"role": "user", "content": "ping"}],
-            "max_tokens": 1,
-            "tools": [
-                {
-                    "type": "function",
-                    "function": {
-                        "name": "ping_tool",
-                        "description": "ping tool to check support",
-                        "parameters": {
-                            "type": "object",
-                            "properties": {
-                                "input": {"type": "string"}
-                            }
-                        }
-                    }
-                }
-            ]
-        }
-        try:
-            response = await self.client.post("/chat/completions", json=body, is_async=True)
-            if response.status_code == 200:
-                return True
-            if self.logger:
-                self.logger.debug(f"Tool check failed with status {response.status_code}: {response.text}")
-            return False
-        except Exception as e:
-            if self.logger:
-                self.logger.debug(f"Tool check exception: {str(e)}")
-            return False
-
-    async def info(self) -> LLMInfo:
-        has_tools = await self._check_tool_support()
-        capabilities = list(self.capabilities)
-        if has_tools:
-            if LLMCapability.TOOLS not in capabilities:
-                capabilities.append(LLMCapability.TOOLS)
-        else:
-            if LLMCapability.TOOLS in capabilities:
-                capabilities.remove(LLMCapability.TOOLS)
-        self.capabilities = capabilities
-
+    def info(self) -> LLMInfo:
         max_tokens = None
         if self.options and self.options.max_tokens:
             max_tokens = self.options.max_tokens
@@ -426,5 +383,5 @@ class OpenAILLM(BaseLLM):
     def __del__(self):
         try:
             self.client.close()
-        except:
+        except Exception:
             pass

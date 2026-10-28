@@ -8,7 +8,6 @@ import codecs
 import json
 import numpy as np
 import re
-import httpx
 
 class VLLMOptions(BaseModel):
     temperature: Optional[float] = None
@@ -43,7 +42,30 @@ class VLLM(BaseLLM):
         self.model = model
         self.options = options
         self.logger = logger
+        # Read once here so info() stays free of network calls.
+        self.context_window = self._fetch_context_window()
         self._initialize_capabilities()
+
+    def _fetch_context_window(self) -> Optional[int]:
+        """The served model's ``max_model_len`` from ``GET /v1/models``, or None when unavailable."""
+        try:
+            response = self.client.get("/models")
+            if response.status_code != 200:
+                return None
+            data = response.json().get("data")
+            if not isinstance(data, list):
+                return None
+            entries = [m for m in data if isinstance(m, dict)]
+            # A server usually serves one model; match by id first, else accept the only entry.
+            entry = next((m for m in entries if m.get("id") == self.model), None)
+            if entry is None and len(entries) == 1:
+                entry = entries[0]
+            max_len = entry.get("max_model_len") if entry else None
+            return max_len if isinstance(max_len, int) and max_len > 0 else None
+        except Exception as e:
+            if self.logger:
+                self.logger.debug(f"Could not read max_model_len from /models: {e}")
+            return None
 
     def _initialize_capabilities(self):
         try:
@@ -178,7 +200,7 @@ class VLLM(BaseLLM):
                         content = data["choices"][0]["delta"].get("content", "")
                         if content:
                             yield content
-                    except:
+                    except Exception:
                         pass
                     
                     buffer = b"data: " + parts[2]
@@ -191,7 +213,7 @@ class VLLM(BaseLLM):
                         content = data["choices"][0]["delta"].get("content", "")
                         if content:
                             yield content
-                    except:
+                    except Exception:
                         pass
 
         except Exception as e:
@@ -295,7 +317,6 @@ class VLLM(BaseLLM):
 
     async def _stream_chat_response(self, body: Dict) -> AsyncGenerator[Message, None]:
         tool_call_chunks = {}
-        has_tool_calls = False
         usage = None
                 
         try:
@@ -312,7 +333,7 @@ class VLLM(BaseLLM):
                     
                     try:
                         data = json.loads(data_str)
-                    except:
+                    except Exception:
                         continue
 
                     if data.get("usage"):
@@ -326,7 +347,6 @@ class VLLM(BaseLLM):
                             yield Message(role="assistant", content=delta["content"], tool_calls=[], images=[])
 
                         if "tool_calls" in delta:
-                            has_tool_calls = True
                             for tc_chunk in delta["tool_calls"]:
                                 idx = tc_chunk.get("index", 0)
                                 if idx not in tool_call_chunks:
@@ -347,7 +367,7 @@ class VLLM(BaseLLM):
                     tc = tool_call_chunks[idx]
                     try:
                         args = json.loads(tc["arguments"])
-                    except:
+                    except Exception:
                         args = {}
                     tool_calls.append(ToolCall(id=tc["id"], name=tc["name"], arguments=args))
                 
@@ -432,7 +452,7 @@ class VLLM(BaseLLM):
             model_name=self.model,
             provider="vllm",
             max_tokens=max_tokens,
-            context_window=32768,
+            context_window=self.context_window,
             capabilities=self.capabilities,
             metadata={}
         )
@@ -475,5 +495,5 @@ class VLLM(BaseLLM):
     def __del__(self):
         try:
             self.client.close()
-        except:
+        except Exception:
             pass
