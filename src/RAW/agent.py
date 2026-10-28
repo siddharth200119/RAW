@@ -4,7 +4,7 @@ import time
 from typing import List, Literal, Optional, AsyncGenerator, Sequence, Set, Union, Dict, Any
 from RAW.models import Tool, ToolParam, LLMCapability, Message, File, FileType, Image, Skill, Usage, discover_skills
 from RAW.llms.base import BaseLLM
-from RAW.utils import Logger, logger, Router
+from RAW.utils import Logger, Router
 from RAW.utils.metrics import Metrics, NullMetrics
 from RAW.utils.compaction import compact_messages, estimate_tokens
 import inspect
@@ -20,7 +20,7 @@ class Agent:
             base_prompt: str = "", 
             tools: Optional[List[Tool]] = None,
             llm: Optional[BaseLLM] = None,
-            logger: Logger = logger,
+            logger: Optional[Logger] = None,
             history: Optional[List[Message]] = None,
             router: Optional[Router] = None,
             skills: Optional[List[Skill]] = None,
@@ -51,7 +51,7 @@ class Agent:
         if reserved:
             raise ValueError(f"Tool names {sorted(reserved)} are reserved for skills.")
         history = history if history is not None else []
-        self.logger = logger
+        self.logger: Logger = logger if logger is not None else Logger(name)
         self.name = name
         # Receives counters/histograms/gauges (raw.agent.*, raw.llm.*, raw.tool.*); never raises into the run.
         self.metrics: Metrics = metrics if metrics is not None else NullMetrics()

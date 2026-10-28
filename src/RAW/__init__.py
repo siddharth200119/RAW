@@ -1,7 +1,7 @@
 from importlib import import_module
 from importlib.metadata import PackageNotFoundError, version
 
-from .models import Tool, Message, Image, LLMCapability, Skill, discover_skills
+from .models import Tool, Message, Image, LLMCapability, Skill, discover_skills, bundled_skills_dir
 from .deciders import BaseDecider, OpenRouterDecider
 from .utils import logger
 from .utils.metrics import Metrics, NullMetrics, InMemoryMetrics, OpenTelemetryMetrics
@@ -43,6 +43,7 @@ __all__ = [
     "LLMCapability",
     "Skill",
     "discover_skills",
+    "bundled_skills_dir",
     "Metrics",
     "NullMetrics",
     "InMemoryMetrics",

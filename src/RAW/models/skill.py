@@ -211,6 +211,11 @@ class Skill(BaseModel):
         return "\n".join(lines)
 
 
+def bundled_skills_dir() -> Path:
+    """Folder holding the skills that ship with the package (currently ``raw-agents``)."""
+    return Path(__file__).resolve().parent.parent / "bundled_skills"
+
+
 def discover_skills(
     paths: Union[str, Path, Sequence[Union[str, Path]]],
     load_tools: bool = False,

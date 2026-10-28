@@ -4,12 +4,13 @@ A powerful and flexible LLM interface library for Gemini and other models, desig
 
 ## Features
 
--   **Gemini Integration**: Seamless support for Google's Gemini models (default: `gemini-1.5-flash`).
--   **Unified Interface**: Clean, consistent API for chat, completion, and tool usage.
--   **Agent Framework**: Build autonomous agents with tool-calling capabilities.
--   **Async Support**: Fully asynchronous implementation using `httpx` and `asyncio`.
--   **Tool Calling**: Easy-to-use function calling/tool usage with schema generation.
--   **Streaming**: Native support for streaming responses.
+-   **Unified Interface**: One async API over Gemini, OpenAI, Anthropic, Groq and vLLM for chat, completion, tool calls and streaming.
+-   **Agent Framework**: Tool-calling agents with skills, sub-agents, automatic context compaction and a loop guard.
+-   **Skills**: Load Claude-format `SKILL.md` folders on demand.
+-   **Decision models**: Typed yes/no/choice/score answers with probabilities (Jev via OpenRouter), usable as a router.
+-   **Observability**: Metrics for runs, LLM calls, tokens, tools and compactions, with an OpenTelemetry adapter.
+-   **Storage**: Local and S3 file backends behind one interface.
+-   **Works with AI coding assistants**: ships a skill that teaches Claude Code to use the library (see below).
 
 ## Installation
 
@@ -34,6 +35,25 @@ uv add "raw-agents[agentic]"
 ```
 
 Using a feature without its extra raises an `ImportError` that names the extra to install. Without `tiktoken`, `count_tokens` falls back to an estimate of 4 characters per token.
+
+## Use RAW with Claude Code (and other coding assistants)
+
+The package ships a skill, `raw-agents`, that teaches an AI coding assistant how to build with this library: install tiers, providers, agents and tools, skills, sub-agents, compaction, metrics, deciders and storage. After installing the package, copy the skill to where Claude Code looks for skills:
+
+```bash
+pip install "raw-agents[agentic]"
+raw-agents install-skill                 # for you, in every project: ~/.claude/skills/raw-agents
+raw-agents install-skill --scope project # only this project: ./.claude/skills/raw-agents (commit it for your team)
+```
+
+Then start a new Claude Code session. Claude reads each skill's short description when a session starts and loads the full instructions only when your task matches, for example "write an agent with raw-agents that ...". You can also type `/` and pick `raw-agents` to load it explicitly. The detailed pages (`providers`, `agent`, `skills`, `subagents`, `observability`, `deciders`, `storage`) are read only when needed, so the skill costs almost no context while idle.
+
+Notes:
+
+- pip cannot write into `~/.claude` itself, which is why this is a separate command. Run it again after `pip install -U raw-agents` to refresh the skill. It only replaces folders it created (use `--force` to replace one it did not), and `raw-agents uninstall-skill` removes it.
+- Set `CLAUDE_CONFIG_DIR` if your Claude Code config lives somewhere other than `~/.claude`.
+- Other tools that read the same `SKILL.md` format: `raw-agents install-skill --dest <their skills folder>`, or `raw-agents skill-path` to print where the files live inside the installed package.
+- A RAW agent can load the same skill: `Agent(..., skills_dir=RAW.bundled_skills_dir())`.
 
 ## Quick Start / Documentation
 

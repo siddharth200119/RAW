@@ -5,7 +5,7 @@ from RAW.llms.base import BaseLLM
 from RAW.models import LLMCapability, Message, Tool, ToolCall, Usage
 from RAW.utils import Logger
 
-# Agent's default `logger` argument is the RAW.utils.logger module, so pass a Logger.
+# Keeps test output tagged with the suite name; the default would be a Logger named after the agent.
 LOGGER = Logger("test_agent")
 
 
@@ -308,3 +308,13 @@ async def test_summary_survives_the_next_call(no_tiktoken):
 
     assert "SUMMARY" in agent.messages[0].content
     assert "SUMMARY" in llm.seen_messages[1][0].content
+
+
+@pytest.mark.asyncio
+async def test_agent_works_without_passing_a_logger():
+    llm = ScriptedLLM(responses=[Message(role="assistant", content="hi", usage=Usage(input_tokens=1, output_tokens=1))])
+    agent = Agent(name="plain", llm=llm)
+
+    assert isinstance(agent.logger, Logger)
+    assert agent.logger.service_name == "plain"
+    assert [c["content"] async for c in agent("hello")] == ["hi"]

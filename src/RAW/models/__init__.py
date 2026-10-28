@@ -6,7 +6,7 @@ from .llm_capability import LLMCapability
 from .llm_info import LLMInfo
 from .jsonschema import jsonschema
 from .file import File, FileType, SUPPORTED_EXTENSIONS
-from .skill import Skill, discover_skills
+from .skill import Skill, discover_skills, bundled_skills_dir
 from .decision import (
     Decision,
     DecisionQuestion,
@@ -38,6 +38,7 @@ __all__ = [
     "SUPPORTED_EXTENSIONS",
     "Skill",
     "discover_skills",
+    "bundled_skills_dir",
     "Decision",
     "DecisionQuestion",
     "DecisionAnswer",

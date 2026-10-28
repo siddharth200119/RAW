@@ -13,6 +13,8 @@ src/RAW/
   __init__.py      # Public exports; agentic ones (Agent, LLMs) load lazily via __getattr__
   agent.py         # Agent loop: tool calls, skills, compaction, metrics, usage    [agentic]
   subagent.py      # agent_tool(): an Agent as a tool, ask_clarification/resume    [agentic]
+  cli.py           # `raw-agents` command: install-skill / uninstall-skill / skill-path [base]
+  bundled_skills/  # Skills shipped in the wheel (raw-agents/SKILL.md + references/)
   llms/            # BaseLLM + one module per provider                                [agentic]
   deciders/        # BaseDecider + OpenRouterDecider (Decisions API: Jev etc.)         [base]
   models/          # Pydantic/dataclass models: Message, Tool, Skill, File, Image,
@@ -94,6 +96,7 @@ Don't bypass it with `--no-verify` to get a commit through; fix the failure.
 
 - Match the surrounding file: type hints on public APIs, `Optional[...]`/`List[...]` in older modules, `X | None` in storage/metrics modules that use `from __future__ import annotations`.
 - Catch `Exception`, never bare `except:`.
-- Log through `RAW.utils.Logger`, never `print` (except `main.py`).
+- Log through `RAW.utils.Logger`, never `print` (except `main.py`, and the user-facing output of `cli.py`).
 - Keep public exports in each package's `__init__.py` / `__all__` in sync with what you add.
 - Update `README.md` when public API, install instructions or extras change.
+- Update the bundled skill (`src/RAW/bundled_skills/raw-agents/`) when the public API changes. `tests/RAW/test_bundled_skill.py` fails if its examples use parameters, imports or defaults that no longer exist, and `Agent`'s constructor parameters must all appear in `references/agent.md`.
