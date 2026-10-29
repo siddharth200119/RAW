@@ -1,7 +1,7 @@
 from typing import List, Optional, AsyncGenerator, Union, Dict, Any
 from RAW.models import Tool, LLMCapability, Message, File, FileType, Image, Skill
 from RAW.llms.base import BaseLLM
-from RAW.utils import Logger, logger, Router
+from RAW.utils import Logger, Router
 import inspect
 
 class Agent:
@@ -11,12 +11,12 @@ class Agent:
             base_prompt: str = "", 
             tools: List[Tool] = [], 
             llm: BaseLLM = None,
-            logger: Logger = logger,
+            logger: Optional[Logger] = None,
             history: List[Message] = [],
             router: Optional[Router] = None,
             skills: List[Skill] = []
         ):
-        self.logger = logger
+        self.logger = logger or Logger(service_name=f"Agent:{name}")
         self.name = name
         self.logger.info(f"Initializing agent: {name}")
         self.llm = llm
