@@ -208,9 +208,13 @@ async for chunk in agent(user_input, stream=True):
              print(content_obj['content'], end="", flush=True)
 ```
 
-#### Loop guard and usage
+#### Loop guard, time limit and usage
 
 `max_iterations` (default 25) caps the LLM calls in one agent run. When it is reached the agent logs a warning, yields `{"error": "max_iterations_reached", "max_iterations": 25, "message": ...}` and stops.
+
+`time_limit_seconds` (default 3600, `None` disables) caps the wall-clock time of one run: LLM calls, compaction and async tools. When it runs out, tool calls still pending get a `Cancelled` result (so the history stays valid), and the agent yields `{"error": "time_limit_reached", "time_limit_seconds": ..., "message": ...}` and stops. Sync tools run on the event loop and can't be interrupted, only stopped after they return.
+
+Tool arguments are validated against the tool's parameter schema before the tool runs. An invalid call, or a call to a tool that is not available, gets an error result the model can correct.
 
 ```python
 agent = Agent(name="Scheduler", llm=llm, logger=logger, max_iterations=10)
@@ -220,6 +224,17 @@ async for chunk in agent("Plan this week's posts"):
 
 print(agent.last_run_usage)  # usage for the last call to agent(...)
 print(agent.usage)           # usage summed over the agent's lifetime
+```
+
+#### Persisting history
+
+`on_message` is called (sync or async) with every message a run adds to the conversation: the user message, assistant messages and tool results, in order. Tool calls that arrive without an id get one first, so each tool result matches its call. Save them as they come, and pass them back as `history=` to resume:
+
+```python
+async def save(message: Message):
+    await db.insert(session_id, message.to_dict())
+
+agent = Agent(name="Scheduler", llm=llm, on_message=save)
 ```
 
 #### Skills
@@ -384,12 +399,12 @@ tracked_storage = LocalStorage(root="/tmp", metrics=metrics_backend)
 
 | Metric | Type | Tags | Meaning |
 |---|---|---|---|
-| `raw.agent.runs` | counter | `status` | Runs; `success`, `error`, `max_iterations`, `empty_response`, `halted`, `cancelled` |
+| `raw.agent.runs` | counter | `status` | Runs; `success`, `error`, `max_iterations`, `time_limit`, `empty_response`, `halted`, `cancelled` |
 | `raw.agent.run_duration_seconds` | histogram | `status` | Wall time of a run |
-| `raw.llm.calls` | counter | `model`, `status` | LLM requests (`success` / `error`) |
+| `raw.llm.calls` | counter | `model`, `status` | LLM requests (`success` / `error` / `time_limit`) |
 | `raw.llm.call_duration_seconds` | histogram | `model`, `status` | Request time; for streams, until the stream ends |
 | `raw.llm.tokens` | counter | `direction` | `input`, `output`, `cache_read`, `cache_write` |
-| `raw.tool.calls` | counter | `tool`, `status` | `success`, `error` or `unknown` (the model called a tool that is not available) |
+| `raw.tool.calls` | counter | `tool`, `status` | `success`, `error`, `unknown` (the model called a tool that is not available), `invalid_arguments` or `time_limit` |
 | `raw.tool.duration_seconds` | histogram | `tool`, `status` | Tool execution time |
 | `raw.agent.context_utilization` | gauge | | Prompt tokens / usable context window before each call |
 | `raw.agent.compactions` | counter | `method` | `truncate`, `summarize` or `drop` |
@@ -462,6 +477,8 @@ agent = Agent(name="support", llm=llm, tools=tools, skills=skills, router=router
 ```
 
 The result also includes `probabilities` per tool and skill for tuning the threshold. Decision models return no text, so the router passes `conversation_summary` through unchanged instead of updating it.
+
+If routing fails (the LLM or decider raises, or the LLM output doesn't match the schema), the router retries `retries` times (default 1) and then selects every tool and skill, with `"fallback": True` in the result, so a routing failure never leaves the agent without tools. Names the LLM selects that don't exist are dropped. Give an LLM router a deterministic configuration (temperature 0).
 
 ## License
 
