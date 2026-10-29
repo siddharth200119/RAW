@@ -1,8 +1,9 @@
 from typing import List, Optional, AsyncGenerator, Union, Dict, Any
-from RAW.models import Tool, LLMCapability, Message, File, FileType, Image, Skill
+from RAW.models import Tool, ToolCall, LLMCapability, Message, File, FileType, Image, Skill
 from RAW.llms.base import BaseLLM
 from RAW.utils import Logger, Router
 import inspect
+import jsonschema as js_lib
 
 class Agent:
     def __init__(
@@ -186,48 +187,8 @@ class Agent:
                     f"{self.name}: {complete_message.content}"
                 )
 
-                for tool_call in complete_message.tool_calls:
-                    yield {
-                        "tool_call": tool_call.name,
-                        "arguments": tool_call.arguments
-                    }
-                    tool_func = self._lookup_tool(tool_call.name)
-
-                    if tool_func:
-                        try:
-                            result = None
-                            async for kind, payload in self._execute_tool(
-                                tool_func, tool_call.arguments
-                            ):
-                                if kind == "stream":
-                                    # Intermediate tool yields (e.g. full table data) → client
-                                    yield {"tool_yield": payload}
-                                else:
-                                    result = payload
-
-                            tool_message = Message(
-                                role="tool",
-                                content=str(result),
-                                tool_call_id=tool_call.id
-                            )
-                            self.messages.append(tool_message)
-                            self.logger.info(
-                                f"Tool executed successfully: {result}"
-                            )
-                            yield {"tool_response": tool_message.content}
-
-                        except Exception as e:
-                            error_msg = f"Error calling tool: {e}"
-                            error_message = Message(
-                                role="tool",
-                                content=error_msg,
-                                tool_call_id=tool_call.id
-                            )
-                            self.messages.append(error_message)
-                            self.logger.error(
-                                f"Error executing tool {tool_call.name}: {e}"
-                            )
-                            yield {"tool_response": error_msg}
+                async for event in self._run_tool_calls(complete_message.tool_calls):
+                    yield event
                 continue
 
             elif accumulated_content:
@@ -256,49 +217,8 @@ class Agent:
             )
 
             if response.tool_calls:
-                for tool_call in response.tool_calls:
-                    yield {
-                        "tool_call": tool_call.name,
-                        "arguments": tool_call.arguments
-                    }
-                    self.logger.info(
-                        msg=f"Tool Called: {tool_call.name} with arguments {tool_call.arguments}"
-                    )
-                    tool_func = self._lookup_tool(tool_call.name)
-                    if tool_func:
-                        try:
-                            result = None
-                            async for kind, payload in self._execute_tool(
-                                tool_func, tool_call.arguments
-                            ):
-                                if kind == "stream":
-                                    yield {"tool_yield": payload}
-                                else:
-                                    result = payload
-
-                            tool_message = Message(
-                                role="tool",
-                                content=str(result),
-                                tool_call_id=tool_call.id
-                            )
-                            self.messages.append(tool_message)
-                            self.logger.info(
-                                f"Tool executed successfully: {result}"
-                            )
-                            yield {"tool_response": tool_message.content}
-
-                        except Exception as e:
-                            error_msg = f"Error calling tool: {e}"
-                            error_message = Message(
-                                role="tool",
-                                content=error_msg,
-                                tool_call_id=tool_call.id
-                            )
-                            self.messages.append(error_message)
-                            self.logger.error(
-                                f"Error executing tool {tool_call.name}: {e}"
-                            )
-                            yield {"tool_response": error_msg}
+                async for event in self._run_tool_calls(response.tool_calls):
+                    yield event
                 continue
             if response.content:
                 self.logger.info(
@@ -310,6 +230,72 @@ class Agent:
             # If no tool calls and no content, break loop
             self.logger.warning(f"Agent {self.name} received empty response from LLM. Stopping.")
             return
+
+    async def _run_tool_calls(self, tool_calls: List[ToolCall]) -> AsyncGenerator[Dict[str, Any], None]:
+        """
+        Run each tool call and append exactly one tool message per call, so the
+        next LLM call never sees a tool call without a result.
+        """
+        for tool_call in tool_calls:
+            yield {
+                "tool_call": tool_call.name,
+                "arguments": tool_call.arguments
+            }
+            self.logger.info(
+                msg=f"Tool Called: {tool_call.name} with arguments {tool_call.arguments}"
+            )
+            tool = self._lookup_tool(tool_call.name)
+            content = self._check_tool_call(tool, tool_call)
+            if content is not None:
+                self.logger.warning(f"Rejected tool call {tool_call.name}: {content}")
+            else:
+                try:
+                    result = None
+                    async for kind, payload in self._execute_tool(
+                        tool.function, tool_call.arguments
+                    ):
+                        if kind == "stream":
+                            # Intermediate tool yields (e.g. full table data) → client
+                            yield {"tool_yield": payload}
+                        else:
+                            result = payload
+                    content = str(result)
+                    self.logger.info(
+                        f"Tool executed successfully: {result}"
+                    )
+                except Exception as e:
+                    content = f"Error calling tool: {e}"
+                    self.logger.error(
+                        f"Error executing tool {tool_call.name}: {e}"
+                    )
+
+            tool_message = Message(
+                role="tool",
+                content=content,
+                tool_call_id=tool_call.id
+            )
+            self.messages.append(tool_message)
+            yield {"tool_response": tool_message.content}
+
+    def _check_tool_call(self, tool: Optional[Tool], tool_call: ToolCall) -> Optional[str]:
+        """Return an error text for the model, or None if the call can run."""
+        if tool is None:
+            available = ", ".join(t.name for t in self.available_tools) or "none"
+            return f"Unknown tool '{tool_call.name}'. Available tools: {available}"
+        try:
+            js_lib.validate(tool_call.arguments, tool.parameters_schema())
+        except js_lib.ValidationError as e:
+            path = "/".join(str(p) for p in e.absolute_path) or "(root)"
+            return (
+                f"Invalid arguments for tool '{tool.name}' at {path}: {e.message}. "
+                f"Fix the arguments and call the tool again."
+            )
+        except js_lib.SchemaError as e:
+            # A tool with a malformed parameter schema still runs, unvalidated.
+            self.logger.warning(
+                f"Tool {tool.name} has an invalid parameter schema, arguments not validated: {e.message}"
+            )
+        return None
 
     async def _execute_tool(self, tool_func, arguments):
         """
@@ -361,14 +347,13 @@ class Agent:
             tools.extend(skill.tools)
         return tools
 
-    def _lookup_tool(self, name: str):
+    def _lookup_tool(self, name: str) -> Optional[Tool]:
         catalog = self._merge_tools(
             self.available_tools,
             self.tools,
             self._tools_from_skills(self.skills),
         )
-        tool = next((t for t in catalog if t.name == name), None)
-        return tool.function if tool else None
+        return next((t for t in catalog if t.name == name), None)
 
     def _build_system_prompt(self) -> Message:
         self.system_prompt = f"""
