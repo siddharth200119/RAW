@@ -530,8 +530,10 @@ class Agent:
         if remaining is None:
             return await awaitable
         if remaining <= 0:
-            if inspect.iscoroutine(awaitable):
-                awaitable.close()
+            # Close the never-awaited coroutine / generator step so Python doesn't warn.
+            close = getattr(awaitable, "close", None)
+            if close is not None:
+                close()
             raise _TimeLimitReached()
         try:
             return await asyncio.wait_for(awaitable, remaining)
