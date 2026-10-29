@@ -59,3 +59,17 @@ def test_message_serialization_deserialization():
     assert len(deserialized.tool_calls) == 1
     assert deserialized.tool_calls[0].name == "add"
     assert deserialized.tool_call_id == "c0"
+
+
+def test_tool_call_accepts_nested_json_arguments():
+    # P0-5: numeric lists and nested objects used to fail validation.
+    arguments = {
+        "qty": [1, 2, 3.5],
+        "row": {"a": 1, "b": {"c": [True, None]}},
+        "lines": [{"item": "OL 9725", "qty": 500, "schedule": [{"date": "2026-11-01", "qty": 250}]}],
+    }
+    tool_call = ToolCall(id="c1", name="create_po_draft", arguments=arguments)
+    assert tool_call.arguments == arguments
+
+    msg = Message(role="assistant", tool_calls=[tool_call])
+    assert Message.from_dict(msg.to_dict()).tool_calls[0].arguments == arguments

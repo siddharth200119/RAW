@@ -128,8 +128,11 @@ class VLLM(BaseLLM):
                 body["messages"][0]["content"][0]["text"] += f"\n\nGive the output as per this json schema: {schema}"
 
         if schema:
+            # json_schema makes vLLM's guided decoding enforce the schema;
+            # json_object only guarantees some valid JSON.
             body["response_format"] = {
-                "type": "json_object"
+                "type": "json_schema",
+                "json_schema": {"name": "response", "schema": dict(schema)}
             }
 
         if stream:

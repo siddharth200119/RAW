@@ -149,6 +149,11 @@ async def test_llm_generate_direct(llm_provider_setup):
         if provider_name == "gemini":
             assert call_args["json"]["generationConfig"]["responseMimeType"] == "application/json"
             assert call_args["json"]["generationConfig"]["responseSchema"] == dict(schema)
+        elif provider_name == "vllm":
+            assert call_args["json"]["response_format"] == {
+                "type": "json_schema",
+                "json_schema": {"name": "response", "schema": dict(schema)},
+            }
         else:
             assert call_args["json"]["response_format"] == {"type": "json_object"}
             assert "json schema" in call_args["json"]["messages"][0]["content"][0]["text"]

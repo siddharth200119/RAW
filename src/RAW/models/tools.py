@@ -7,7 +7,10 @@ class ToolParam(BaseModel):
     description: str
     enums: List[str] = []
     required: bool = False
-    items: Optional[Dict[str, str]] = None
+    items: Optional[Dict[str, Any]] = None
+    # Extra JSON Schema keywords merged into the property as-is, e.g.
+    # {"properties": {...}, "required": [...]} for objects or {"minimum": 0}.
+    json_schema: Optional[Dict[str, Any]] = None
 
     def to_property(self):
         prop = {
@@ -18,6 +21,8 @@ class ToolParam(BaseModel):
             prop["enum"] = self.enums
         if self.items:
             prop["items"] = self.items
+        if self.json_schema:
+            prop.update(self.json_schema)
         return prop
 
 
@@ -32,7 +37,7 @@ class Tool(BaseModel):
         Callable[..., AsyncGenerator[str, None]],
     ]
 
-    def to_dict(self):
+    def parameters_schema(self) -> Dict[str, Any]:
         properties = {}
         required_fields = []
 
@@ -42,14 +47,17 @@ class Tool(BaseModel):
                 required_fields.append(param.name)
 
         return {
+            "type": "object",
+            "properties": properties,
+            "required": required_fields,
+        }
+
+    def to_dict(self):
+        return {
             "type": "function",
             "function": {
                 "name": self.name,
                 "description": self.description,
-                "parameters": {
-                    "type": "object",
-                    "properties": properties,
-                    "required": required_fields if required_fields else [],
-                },
+                "parameters": self.parameters_schema(),
             },
         }
