@@ -2,9 +2,18 @@ from typing import List, Optional, AsyncGenerator, Union, Dict, Any, Callable, A
 from RAW.models import Tool, ToolCall, LLMCapability, Message, File, FileType, Image, Skill
 from RAW.llms.base import BaseLLM
 from RAW.utils import Logger, Router
+import asyncio
 import inspect
 import uuid
 import jsonschema as js_lib
+
+
+class _TimeLimitReached(Exception):
+    """Raised inside the loop when the agent's time limit runs out."""
+
+
+_TOOL_CANCELLED = "Cancelled: the agent's time limit was reached before this tool finished."
+
 
 class Agent:
     def __init__(
@@ -18,6 +27,7 @@ class Agent:
             router: Optional[Router] = None,
             skills: List[Skill] = [],
             on_message: Optional[Callable[[Message], Union[None, Awaitable[None]]]] = None,
+            time_limit_seconds: Optional[float] = 3600,
         ):
         self.logger = logger or Logger(service_name=f"Agent:{name}")
         self.name = name
@@ -28,6 +38,13 @@ class Agent:
         # in order, so callers can persist history exactly as the loop built it.
         # Errors raised by the hook propagate to the caller.
         self.on_message = on_message
+        # Wall-clock budget for one call of the agent (LLM calls + tools), so a
+        # looping model cannot hold the GPU. None disables it. Sync tools run on
+        # the event loop and cannot be interrupted, only stopped after they return.
+        self.time_limit_seconds = time_limit_seconds
+        self._deadline: Optional[float] = None
+        # Why the last call ended early ("time_limit"), or None.
+        self.stop_reason: Optional[str] = None
         
         if not self.llm:
             raise ValueError("Agent must be initialized with an LLM.")
@@ -75,6 +92,11 @@ class Agent:
             skill: Optional[Skill] = None,
         ) -> AsyncGenerator[Union[Dict[str, Any], str], None]:
         self.logger.info(f'USER MESSAGE: {user_message}')
+        self.stop_reason = None
+        self._deadline = (
+            asyncio.get_running_loop().time() + self.time_limit_seconds
+            if self.time_limit_seconds is not None else None
+        )
         user_images: List[Image] = []
         #logic to process files
         for file in user_files:
@@ -147,30 +169,44 @@ class Agent:
                 f"System prompt updated with these skills: "
                 f"{', '.join(s.name for s in self.available_skills)}"
             )
-        if stream:
-            async for chunk in self.execute_stream():
-                if isinstance(chunk, Message):
-                    yield {"agent_name": self.name, 'content': chunk.model_dump()}
-                else:
-                    yield {"agent_name": self.name, 'content': chunk}
-        else:
-            async for chunk in self.execute_no_stream():
-                if isinstance(chunk, Message):
-                    yield {"agent_name": self.name, 'content': chunk.model_dump()}
-                else:
-                    yield {"agent_name": self.name, 'content': chunk}
+        try:
+            if stream:
+                async for chunk in self.execute_stream():
+                    if isinstance(chunk, Message):
+                        yield {"agent_name": self.name, 'content': chunk.model_dump()}
+                    else:
+                        yield {"agent_name": self.name, 'content': chunk}
+            else:
+                async for chunk in self.execute_no_stream():
+                    if isinstance(chunk, Message):
+                        yield {"agent_name": self.name, 'content': chunk.model_dump()}
+                    else:
+                        yield {"agent_name": self.name, 'content': chunk}
+        except _TimeLimitReached:
+            self.stop_reason = "time_limit"
+            text = (
+                f"Stopped: the time limit of {self.time_limit_seconds:g} seconds "
+                f"was reached before the task finished."
+            )
+            self.logger.warning(f"Agent {self.name}: {text}")
+            stop_message = Message(role="assistant", content=text)
+            await self._append(stop_message)
+            yield {
+                "agent_name": self.name,
+                'content': stop_message.model_dump() if stream else text
+            }
 
     async def execute_stream(self) -> AsyncGenerator[Union[Message, Dict[str, Any]], None]:
         while True:
-            chat_response_generator = await self.llm.chat(
+            chat_response_generator = await self._within_limit(self.llm.chat(
                 messages=self.messages, schema=None, stream=True, tools=self.available_tools
-            )
+            ))
 
             accumulated_content = ""
             final_message = None
             has_tool_calls = False
 
-            async for response in chat_response_generator:
+            async for response in self._iter_within_limit(chat_response_generator):
                 if hasattr(response, "tool_calls") and response.tool_calls:
                     has_tool_calls = True
                     final_message = response
@@ -216,7 +252,9 @@ class Agent:
                      
     async def execute_no_stream(self) -> AsyncGenerator[Union[Message, Dict[str, Any]], None]:
         while True:
-            response: Message = await self.llm.chat(messages=self.messages, schema=None, stream=False, tools=self.available_tools)
+            response: Message = await self._within_limit(
+                self.llm.chat(messages=self.messages, schema=None, stream=False, tools=self.available_tools)
+            )
             await self._append(response)
             self.logger.debug(
                 f"Agent {self.name} generated response: {response.content}"
@@ -254,6 +292,7 @@ class Agent:
         Run each tool call and append exactly one tool message per call, so the
         next LLM call never sees a tool call without a result.
         """
+        time_limit_reached = False
         for tool_call in tool_calls:
             yield {
                 "tool_call": tool_call.name,
@@ -264,13 +303,15 @@ class Agent:
             )
             tool = self._lookup_tool(tool_call.name)
             content = self._check_tool_call(tool, tool_call)
-            if content is not None:
+            if time_limit_reached:
+                content = _TOOL_CANCELLED
+            elif content is not None:
                 self.logger.warning(f"Rejected tool call {tool_call.name}: {content}")
             else:
                 try:
                     result = None
-                    async for kind, payload in self._execute_tool(
-                        tool.function, tool_call.arguments
+                    async for kind, payload in self._iter_within_limit(
+                        self._execute_tool(tool.function, tool_call.arguments)
                     ):
                         if kind == "stream":
                             # Intermediate tool yields (e.g. full table data) → client
@@ -281,6 +322,10 @@ class Agent:
                     self.logger.info(
                         f"Tool executed successfully: {result}"
                     )
+                except _TimeLimitReached:
+                    # Remaining calls still get a result so the history stays valid.
+                    time_limit_reached = True
+                    content = _TOOL_CANCELLED
                 except Exception as e:
                     content = f"Error calling tool: {e}"
                     self.logger.error(
@@ -294,6 +339,42 @@ class Agent:
             )
             await self._append(tool_message)
             yield {"tool_response": tool_message.content}
+
+        if time_limit_reached:
+            raise _TimeLimitReached()
+
+    def _remaining_time(self) -> Optional[float]:
+        if self._deadline is None:
+            return None
+        return self._deadline - asyncio.get_running_loop().time()
+
+    async def _within_limit(self, awaitable: Awaitable[Any]) -> Any:
+        """Await within the agent's time limit, raising _TimeLimitReached when it runs out."""
+        remaining = self._remaining_time()
+        if remaining is None:
+            return await awaitable
+        if remaining <= 0:
+            if inspect.iscoroutine(awaitable):
+                awaitable.close()
+            raise _TimeLimitReached()
+        try:
+            return await asyncio.wait_for(awaitable, remaining)
+        except asyncio.TimeoutError:
+            # A TimeoutError raised by the awaited code itself is not ours.
+            if self._remaining_time() > 0:
+                raise
+            raise _TimeLimitReached() from None
+
+    async def _iter_within_limit(self, agen: AsyncGenerator[Any, None]) -> AsyncGenerator[Any, None]:
+        try:
+            while True:
+                try:
+                    item = await self._within_limit(agen.__anext__())
+                except StopAsyncIteration:
+                    return
+                yield item
+        finally:
+            await agen.aclose()
 
     def _check_tool_call(self, tool: Optional[Tool], tool_call: ToolCall) -> Optional[str]:
         """Return an error text for the model, or None if the call can run."""

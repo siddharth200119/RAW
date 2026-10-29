@@ -169,3 +169,118 @@ async def test_tool_calls_without_ids_get_matching_ids(stream):
     result_ids = [m.tool_call_id for m in tool_messages(agent.messages)]
     assert all(call_ids) and len(set(call_ids)) == 3
     assert result_ids == call_ids
+
+
+class SlowLLM(FakeLLM):
+    def __init__(self, delay):
+        super().__init__([])
+        self.delay = delay
+
+    async def chat(self, messages, schema=None, stream=False, tools=None):
+        import asyncio
+        await asyncio.sleep(self.delay)
+        return await super().chat(messages, schema, stream, tools)
+
+
+class LoopingLLM(FakeLLM):
+    """Always asks for two more tool calls, like a confused model."""
+
+    async def chat(self, messages, schema=None, stream=False, tools=None):
+        self.responses = [Message(role="assistant", tool_calls=[
+            ToolCall(id=None, name="wait", arguments={}),
+            ToolCall(id=None, name="wait", arguments={}),
+        ])]
+        return await super().chat(messages, schema, stream, tools)
+
+
+def wait_tool(seconds):
+    async def wait():
+        import asyncio
+        await asyncio.sleep(seconds)
+        return "waited"
+
+    return Tool(name="wait", description="wait", parameters=[], function=wait)
+
+
+def assert_history_valid(messages):
+    open_calls = []
+    for m in messages:
+        if m.role == "assistant":
+            assert not open_calls, "assistant message before every tool call got a result"
+            open_calls = [tc.id for tc in m.tool_calls]
+        elif m.role == "tool":
+            assert m.tool_call_id == open_calls.pop(0)
+    assert not open_calls
+
+
+def test_time_limit_defaults_to_one_hour():
+    assert Agent(name="t", llm=FakeLLM([])).time_limit_seconds == 3600
+
+
+@pytest.mark.parametrize("stream", [False, True])
+async def test_looping_model_stops_at_time_limit(stream):
+    import time
+
+    agent = Agent(name="t", llm=LoopingLLM([]), tools=[wait_tool(0.01)], time_limit_seconds=0.2)
+    start = time.monotonic()
+    events = await run(agent, "loop forever", stream)
+
+    assert time.monotonic() - start < 1
+    assert agent.stop_reason == "time_limit"
+    assert "time limit of 0.2 seconds" in agent.messages[-1].content
+    final = events[-1]["content"]
+    assert "time limit" in (final["content"] if stream else final)
+    assert_history_valid(agent.messages[1:])
+
+
+@pytest.mark.parametrize("stream", [False, True])
+async def test_hung_tool_is_cancelled_and_every_call_gets_a_result(stream):
+    import time
+
+    llm = FakeLLM([Message(role="assistant", tool_calls=[
+        ToolCall(id="a", name="wait", arguments={}),
+        ToolCall(id="b", name="wait", arguments={}),
+    ])])
+    agent = Agent(name="t", llm=llm, tools=[wait_tool(30)], time_limit_seconds=0.1)
+    start = time.monotonic()
+    await run(agent, "go", stream)
+
+    assert time.monotonic() - start < 1
+    results = tool_messages(agent.messages)
+    assert [m.tool_call_id for m in results] == ["a", "b"]
+    assert all(m.content.startswith("Cancelled") for m in results)
+    assert_history_valid(agent.messages[1:])
+
+
+@pytest.mark.parametrize("stream", [False, True])
+async def test_hung_llm_call_stops_at_time_limit(stream):
+    import time
+
+    agent = Agent(name="t", llm=SlowLLM(30), time_limit_seconds=0.1)
+    start = time.monotonic()
+    await run(agent, "hi", stream)
+
+    assert time.monotonic() - start < 1
+    assert agent.stop_reason == "time_limit"
+
+
+async def test_no_time_limit_when_disabled():
+    agent = Agent(name="t", llm=SlowLLM(0.05), time_limit_seconds=None)
+    await run(agent, "hi", stream=False)
+    assert agent.stop_reason is None
+    assert agent.messages[-1].content == "done"
+
+
+async def test_tool_raising_its_own_timeout_is_a_tool_error():
+    import asyncio
+
+    async def flaky():
+        raise asyncio.TimeoutError("upstream timed out")
+
+    tool = Tool(name="flaky", description="d", parameters=[], function=flaky)
+    llm = FakeLLM([tool_call("flaky", {}), Message(role="assistant", content="ok")])
+    agent = Agent(name="t", llm=llm, tools=[tool])
+    await run(agent, "go", stream=False)
+
+    assert agent.stop_reason is None
+    assert tool_messages(agent.messages)[0].content.startswith("Error calling tool")
