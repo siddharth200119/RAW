@@ -1,7 +1,11 @@
+from __future__ import annotations
+
 from abc import ABC
 from RAW.models import Message, Image, LLMInfo, jsonschema, Tool
-from typing import List, Union, AsyncGenerator, Optional, Dict
-import numpy as np
+from typing import TYPE_CHECKING, List, Union, AsyncGenerator, Optional, Dict
+
+if TYPE_CHECKING:
+    import numpy as np
 
 
 class BaseLLM(ABC):

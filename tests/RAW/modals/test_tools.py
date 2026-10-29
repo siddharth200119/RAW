@@ -1,4 +1,3 @@
-import pytest
 from RAW.models.tools import Tool, ToolParam
 
 

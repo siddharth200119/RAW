@@ -1,0 +1,17 @@
+#!/usr/bin/env bash
+# Lint and run the test suite before every commit. Bypass with `git commit --no-verify`.
+set -euo pipefail
+
+cd "$(git rev-parse --show-toplevel)"
+
+echo "pre-commit: running ruff..."
+if ! uv run ruff check .; then
+    echo "pre-commit: lint failed, commit aborted (try \`uv run ruff check --fix .\`)." >&2
+    exit 1
+fi
+
+echo "pre-commit: running tests..."
+if ! uv run pytest -q; then
+    echo "pre-commit: tests failed, commit aborted." >&2
+    exit 1
+fi

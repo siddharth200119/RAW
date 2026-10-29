@@ -5,7 +5,20 @@ from unittest.mock import MagicMock, AsyncMock, patch
 from RAW.llms.vllm import VLLM, VLLMOptions
 from RAW.llms.openai import OpenAILLM, OpenAIOptions
 from RAW.llms.gemini import GeminiLLM, GeminiOptions
-from RAW.models import LLMCapability, Message, LLMInfo, jsonschema, Tool, ToolCall
+from RAW.models import LLMCapability, Message, LLMInfo, jsonschema, Tool
+
+
+MODELS_MISSING = MagicMock(spec=httpx.Response, status_code=404)
+
+# Real /v1/models payload from a vLLM server (permission details trimmed to one entry).
+VLLM_MODELS_PAYLOAD = {
+    "object": "list",
+    "data": [{
+        "id": "Qwen/Qwen3.8-27B-FP8", "object": "model", "created": 1793187316, "owned_by": "vllm",
+        "root": "Qwen/Qwen3.8-27B-FP8", "parent": None, "max_model_len": 32000,
+        "permission": [{"id": "modelperm-9f3d3192e0bdbb7d", "object": "model_permission", "allow_sampling": True}],
+    }],
+}
 
 
 @pytest.fixture(params=[
@@ -26,8 +39,13 @@ def llm_provider_setup(request):
     elif llm_class is GeminiLLM:
         client = llm_class(model=model_name, options=options, api_key="test_key")
     else:
-        client = llm_class(model=model_name, base_url=default_base_url, options=options)
-        
+        # Mock vLLM's startup capability probes so the fixture never hits the network.
+        probe_response = MagicMock(spec=httpx.Response)
+        probe_response.status_code = 200
+        with patch("RAW.utils.requests.RequestsClient.post", return_value=probe_response), \
+                patch("RAW.utils.requests.RequestsClient.get", return_value=MODELS_MISSING):
+            client = llm_class(model=model_name, base_url=default_base_url, options=options)
+
     return client, model_name, provider_name, default_base_url
 
 
@@ -38,22 +56,19 @@ def test_llm_init(llm_provider_setup):
     assert LLMCapability.COMPLETION in client.capabilities
 
 
-@pytest.mark.asyncio
-async def test_llm_info(llm_provider_setup):
+def test_llm_info(llm_provider_setup):
     client, model_name, provider_name, _ = llm_provider_setup
-    mock_response = MagicMock(spec=httpx.Response)
-    mock_response.status_code = 200
-
-    with patch.object(client.client, "post", new_callable=AsyncMock) as mock_post:
-        mock_post.return_value = mock_response
-
-        info = await client.info()
-        assert isinstance(info, LLMInfo)
-        assert info.model_name == model_name
-        assert info.provider == provider_name
-        assert info.max_tokens == 100
-        assert info.context_window in [16384, 32768, 1048576]
-        assert LLMCapability.TOOLS in info.capabilities
+    info = client.info()
+    assert isinstance(info, LLMInfo)
+    assert info.model_name == model_name
+    assert info.provider == provider_name
+    assert info.max_tokens == 100
+    if provider_name == "vllm":
+        # Read from the server's /models; the fixture's stub reports nothing.
+        assert info.context_window is None
+    else:
+        assert info.context_window in [16384, 1048576]
+    assert LLMCapability.TOOLS in info.capabilities
 
 
 @pytest.mark.asyncio
@@ -149,13 +164,11 @@ async def test_llm_generate_direct(llm_provider_setup):
         if provider_name == "gemini":
             assert call_args["json"]["generationConfig"]["responseMimeType"] == "application/json"
             assert call_args["json"]["generationConfig"]["responseSchema"] == dict(schema)
-        elif provider_name == "vllm":
+        else:
             assert call_args["json"]["response_format"] == {
                 "type": "json_schema",
-                "json_schema": {"name": "response", "schema": dict(schema)},
+                "json_schema": {"name": "response", "schema": dict(schema)}
             }
-        else:
-            assert call_args["json"]["response_format"] == {"type": "json_object"}
             assert "json schema" in call_args["json"]["messages"][0]["content"][0]["text"]
 
 
@@ -243,7 +256,8 @@ def test_vllm_dynamic_capabilities_success():
         mock_resp.status_code = 200
         return mock_resp
 
-    with patch("RAW.utils.requests.RequestsClient.post", side_effect=mock_post) as mock_post_method:
+    with patch("RAW.utils.requests.RequestsClient.get", return_value=MODELS_MISSING), \
+            patch("RAW.utils.requests.RequestsClient.post", side_effect=mock_post) as mock_post_method:
         client = VLLM(model="Qwen/Qwen2.5-14B-Instruct-AWQ", base_url="http://127.0.0.1:11434")
         
         assert LLMCapability.COMPLETION in client.capabilities
@@ -269,7 +283,8 @@ def test_vllm_dynamic_capabilities_partial():
             mock_resp.status_code = 400
         return mock_resp
 
-    with patch("RAW.utils.requests.RequestsClient.post", side_effect=mock_post):
+    with patch("RAW.utils.requests.RequestsClient.get", return_value=MODELS_MISSING), \
+            patch("RAW.utils.requests.RequestsClient.post", side_effect=mock_post):
         client = VLLM(model="Qwen/Qwen2.5-14B-Instruct-AWQ", base_url="http://127.0.0.1:11434")
         
         assert LLMCapability.COMPLETION in client.capabilities
@@ -281,9 +296,61 @@ def test_vllm_dynamic_capabilities_partial():
 
 
 def test_vllm_dynamic_capabilities_connection_error():
-    with patch("RAW.utils.requests.RequestsClient.post", side_effect=httpx.ConnectError("Connection refused")):
+    with patch("RAW.utils.requests.RequestsClient.get", side_effect=httpx.ConnectError("Connection refused")), \
+            patch("RAW.utils.requests.RequestsClient.post", side_effect=httpx.ConnectError("Connection refused")):
         client = VLLM(model="Qwen/Qwen2.5-14B-Instruct-AWQ", base_url="http://127.0.0.1:11434")
         
-        fallback_expected = [LLMCapability.TOOLS, LLMCapability.COMPLETION]
-        assert client.capabilities == fallback_expected
+        assert client.capabilities == [LLMCapability.COMPLETION]
 
+
+
+def _vllm_with_models(model, models_response):
+    probe = MagicMock(spec=httpx.Response, status_code=200)
+    with patch("RAW.utils.requests.RequestsClient.get", return_value=models_response) as get, \
+            patch("RAW.utils.requests.RequestsClient.post", return_value=probe):
+        client = VLLM(model=model, base_url="http://127.0.0.1:8000")
+    return client, get
+
+
+def _models_response(payload, status=200):
+    response = MagicMock(spec=httpx.Response, status_code=status)
+    response.json.return_value = payload
+    return response
+
+
+def test_vllm_context_window_comes_from_max_model_len():
+    client, get = _vllm_with_models("Qwen/Qwen3.8-27B-FP8", _models_response(VLLM_MODELS_PAYLOAD))
+
+    get.assert_called_once_with("/models")
+    assert client.info().context_window == 32000
+
+
+def test_vllm_info_makes_no_network_calls():
+    client, _ = _vllm_with_models("Qwen/Qwen3.8-27B-FP8", _models_response(VLLM_MODELS_PAYLOAD))
+
+    with patch("RAW.utils.requests.RequestsClient.get") as get, \
+            patch("RAW.utils.requests.RequestsClient.post") as post:
+        assert client.info().context_window == 32000
+    get.assert_not_called()
+    post.assert_not_called()
+
+
+def test_vllm_single_served_model_is_used_when_the_name_differs():
+    client, _ = _vllm_with_models("my-alias", _models_response(VLLM_MODELS_PAYLOAD))
+    assert client.info().context_window == 32000
+
+
+def test_vllm_context_window_matches_the_model_by_id():
+    other = dict(VLLM_MODELS_PAYLOAD["data"][0], id="other", max_model_len=4096)
+    payload = {"object": "list", "data": [other, VLLM_MODELS_PAYLOAD["data"][0]]}
+    client, _ = _vllm_with_models("Qwen/Qwen3.8-27B-FP8", _models_response(payload))
+    assert client.info().context_window == 32000
+
+
+def test_vllm_context_window_is_none_when_ambiguous_or_unavailable():
+    other = dict(VLLM_MODELS_PAYLOAD["data"][0], id="other", max_model_len=4096)
+    ambiguous = {"object": "list", "data": [other, dict(other, id="another")]}
+    assert _vllm_with_models("nope", _models_response(ambiguous))[0].info().context_window is None
+    assert _vllm_with_models("m", _models_response({"data": [{"id": "m"}]}))[0].info().context_window is None
+    assert _vllm_with_models("m", _models_response({}, status=500))[0].info().context_window is None
+    assert _vllm_with_models("m", MODELS_MISSING)[0].info().context_window is None

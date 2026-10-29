@@ -8,7 +8,7 @@ from pathlib import Path
 from typing import TYPE_CHECKING, BinaryIO
 
 if TYPE_CHECKING:
-    from RAW.storage.base import Storage
+    from RAW.utils.storage.base import Storage
 
 
 class FileType(str, Enum):
@@ -33,12 +33,12 @@ SUPPORTED_EXTENSIONS: dict[FileType, set[str]] = {
 
 @dataclass(slots=True)
 class File:
-    """Represents a file reference managed by a :class:`~RAW.storage.Storage` backend.
+    """Represents a file reference managed by a :class:`~RAW.utils.storage.Storage` backend.
 
     Attributes:
         name:      Human-readable filename (e.g. ``"report.xlsx"``).
         file_type: Semantic type of the file content.
-        storage:   The :class:`~RAW.storage.Storage` instance that owns this
+        storage:   The :class:`~RAW.utils.storage.Storage` instance that owns this
                    file.  All I/O must go through this object.
         location:  Absolute local path **or** object-storage key — interpreted
                    by the attached ``storage`` backend.
@@ -59,7 +59,7 @@ class File:
     def open(self) -> BinaryIO:
         """Open this file for reading via its storage backend.
 
-        Delegates to :meth:`~RAW.storage.Storage.open` so the caller never
+        Delegates to :meth:`~RAW.utils.storage.Storage.open` so the caller never
         needs to reference ``file.storage`` directly.  The returned stream
         must be closed by the caller — a context manager is recommended::
 

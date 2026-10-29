@@ -6,7 +6,7 @@ import shutil
 from pathlib import Path
 from typing import BinaryIO
 
-from RAW.metrics import Metrics
+from RAW.utils.metrics import Metrics
 from RAW.models.file import File
 from .base import Storage
 
@@ -17,8 +17,8 @@ class LocalStorage(Storage):
     Args:
         root:    Base directory for all managed files.  Defaults to the current
                  working directory.  Sub-directories are created automatically.
-        metrics: Optional :class:`~RAW.metrics.Metrics` implementation.
-                 Defaults to :class:`~RAW.metrics.NullMetrics` (no-op).
+        metrics: Optional :class:`~RAW.utils.metrics.Metrics` implementation.
+                 Defaults to :class:`~RAW.utils.metrics.NullMetrics` (no-op).
 
     Example::
 

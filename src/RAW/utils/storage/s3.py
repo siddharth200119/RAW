@@ -5,7 +5,7 @@ Cloudflare R2, Backblaze B2, …).  Pass a custom ``endpoint_url`` when
 constructing the boto3 client to point at a non-AWS provider::
 
     import boto3
-    from RAW.storage import S3Storage
+    from RAW.utils.storage import S3Storage
 
     client = boto3.client(
         "s3",
@@ -24,12 +24,18 @@ and downloads wrap the boto3 ``StreamingBody`` in a standard
 from __future__ import annotations
 
 import io
-from typing import BinaryIO, Optional
+from typing import TYPE_CHECKING, BinaryIO, Optional
 
-from botocore.client import BaseClient
-from botocore.exceptions import ClientError
+# boto3 is optional (`raw-agents[s3]`); S3Storage raises on construction without it.
+try:
+    from botocore.exceptions import ClientError
+except ImportError:  # pragma: no cover - exercised only without the extra
+    ClientError = None  # type: ignore[assignment,misc]
 
-from RAW.metrics import Metrics
+if TYPE_CHECKING:
+    from botocore.client import BaseClient
+
+from RAW.utils.metrics import Metrics
 from RAW.models.file import File
 from .base import Storage
 
@@ -46,8 +52,8 @@ class S3Storage(Storage):
         default_bucket: Optional bucket to fall back to when ``file.bucket``
                         is ``None``.  If neither is set a :class:`ValueError`
                         is raised at call time.
-        metrics:        Optional :class:`~RAW.metrics.Metrics` implementation.
-                        Defaults to :class:`~RAW.metrics.NullMetrics` (no-op).
+        metrics:        Optional :class:`~RAW.utils.metrics.Metrics` implementation.
+                        Defaults to :class:`~RAW.utils.metrics.NullMetrics` (no-op).
 
     Note:
         Bucket auto-creation is intentionally **not** performed.  Creating
@@ -62,6 +68,10 @@ class S3Storage(Storage):
         default_bucket: str | None = None,
         metrics: Metrics | None = None,
     ) -> None:
+        if ClientError is None:
+            raise ImportError(
+                "S3Storage requires boto3. Install it with: pip install 'raw-agents[s3]'"
+            )
         super().__init__(metrics=metrics)
         self._client = client
         self._default_bucket = default_bucket

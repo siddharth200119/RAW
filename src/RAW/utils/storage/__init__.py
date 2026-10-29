@@ -2,7 +2,7 @@
 
 Public surface::
 
-    from RAW.storage import Storage, LocalStorage, S3Storage
+    from RAW.utils.storage import Storage, LocalStorage, S3Storage
 
 The concrete backends implement the :class:`Storage` ABC, so callers only
 ever depend on the abstract interface – swapping backends requires no changes

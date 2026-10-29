@@ -2,7 +2,6 @@ import numpy as np
 import pytest
 import cv2
 import base64
-from pathlib import Path
 from RAW.models.image import Image
 
 

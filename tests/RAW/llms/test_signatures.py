@@ -1,6 +1,5 @@
 import inspect
 from RAW.llms.base import BaseLLM
-from RAW.llms.vllm import VLLM
 
 
 def verify_signature(target_func, expected_params):

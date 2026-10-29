@@ -8,7 +8,7 @@ from contextlib import contextmanager
 from dataclasses import dataclass, field
 from typing import BinaryIO, Generator
 
-from RAW.metrics import Metrics, NullMetrics
+from RAW.utils.metrics import Metrics, NullMetrics
 from RAW.models.file import File
 
 
@@ -40,12 +40,12 @@ class Storage(ABC):
 
     1. Subclass :class:`Storage`.
     2. Implement the four abstract methods below.
-    3. Optionally pass a :class:`~RAW.metrics.Metrics` instance to ``__init__``.
+    3. Optionally pass a :class:`~RAW.utils.metrics.Metrics` instance to ``__init__``.
 
     Args:
-        metrics: A :class:`~RAW.metrics.Metrics` implementation for emitting
+        metrics: A :class:`~RAW.utils.metrics.Metrics` implementation for emitting
                  operation counters, durations, and byte throughput.
-                 Defaults to :class:`~RAW.metrics.NullMetrics` (no-op).
+                 Defaults to :class:`~RAW.utils.metrics.NullMetrics` (no-op).
 
     Metric names emitted:
 

@@ -1,12 +1,13 @@
 import os
+import codecs
 import json
 import re
 import numpy as np
 from pydantic import BaseModel
-from typing import List, Optional, Dict, Union, AsyncGenerator, Literal
+from typing import Any, List, Optional, Dict, Union, AsyncGenerator, Literal
 from .base import BaseLLM
 from RAW.utils import RequestsClient, Logger, count_tokens as count_tokens_util
-from RAW.models import LLMCapability, Message, Image, Tool, ToolCall, LLMInfo, jsonschema
+from RAW.models import LLMCapability, Message, Image, Tool, ToolCall, LLMInfo, Usage, jsonschema
 
 
 class OpenAIOptions(BaseModel):
@@ -14,6 +15,42 @@ class OpenAIOptions(BaseModel):
     top_p: Optional[float] = None
     max_tokens: Optional[int] = None
     stop: Optional[List[str]] = None
+    # Raw provider tool dicts appended to `tools` as-is (not executed by RAW).
+    native_tools: List[Dict[str, Any]] = []
+    # "json_schema" sends the schema as a real response_format; "json_object" is the
+    # older JSON mode for servers that don't support json_schema.
+    structured_output: Literal["json_schema", "json_object"] = "json_schema"
+
+
+# OpenAIOptions / VLLMOptions fields that configure RAW and are not sent as request params.
+NON_BODY_OPTIONS = {"native_tools", "structured_output"}
+
+
+def build_response_format(schema: Union[Dict, str], mode: str = "json_schema") -> Dict:
+    """Build an OpenAI-compatible `response_format` for a schema dict (or JSON string)."""
+    if isinstance(schema, str):
+        try:
+            schema = json.loads(schema)
+        except (ValueError, TypeError):
+            schema = None
+    if mode != "json_schema" or not isinstance(schema, dict):
+        return {"type": "json_object"}
+    name = re.sub(r'[^a-zA-Z0-9_-]', '_', str(schema.get("title") or "response"))[:64]
+    return {
+        "type": "json_schema",
+        "json_schema": {"name": name, "schema": dict(schema)}
+    }
+
+
+def iter_sse_data(buffer: str) -> tuple:
+    """Split complete `data: ` lines out of an SSE text buffer. Returns (payloads, rest)."""
+    *lines, rest = buffer.split("\n")
+    payloads = []
+    for line in lines:
+        line = line.strip()
+        if line.startswith("data:"):
+            payloads.append(line[5:].strip())
+    return payloads, rest
 
 
 OPENAI_MODEL_CAPABILITIES: Dict[str, List[LLMCapability]] = {
@@ -62,7 +99,7 @@ class OpenAILLM(BaseLLM):
         }
         
         if self.options:
-            body.update(self.options.model_dump(exclude_none=True))
+            body.update(self.options.model_dump(exclude_none=True, exclude=NON_BODY_OPTIONS))
         
         if LLMCapability.VISION in self.capabilities and images:
             body["messages"][0]["content"] = [
@@ -88,9 +125,7 @@ class OpenAILLM(BaseLLM):
                 body["messages"][0]["content"][0]["text"] += f"\n\nGive the output as per this json schema: {schema}"
 
         if schema:
-            body["response_format"] = {
-                "type": "json_object"
-            }
+            body["response_format"] = build_response_format(schema, self._options().structured_output)
 
         if stream:
             return self._stream_response(body)
@@ -132,7 +167,7 @@ class OpenAILLM(BaseLLM):
                         content = data["choices"][0]["delta"].get("content", "")
                         if content:
                             yield content
-                    except:
+                    except Exception:
                         pass
                     
                     buffer = b"data: " + parts[2]
@@ -145,7 +180,7 @@ class OpenAILLM(BaseLLM):
                         content = data["choices"][0]["delta"].get("content", "")
                         if content:
                             yield content
-                    except:
+                    except Exception:
                         pass
 
         except Exception as e:
@@ -184,7 +219,10 @@ class OpenAILLM(BaseLLM):
             ]
         return msg_dict
 
-    async def chat(self, messages: List[Message], schema: Optional[str] = None, stream: bool = False, tools: Optional[List[Tool]] = None) -> Union[Message, AsyncGenerator[Message, None]]:
+    def _options(self) -> OpenAIOptions:
+        return self.options or OpenAIOptions()
+
+    async def chat(self, messages: List[Message], schema: Optional[str] = None, stream: bool = False, tools: Optional[List[Tool]] = None, native_tools: Optional[List[Dict]] = None) -> Union[Message, AsyncGenerator[Message, None]]:
         if not messages:
             if self.logger:
                 self.logger.warning("Messages list is empty.")
@@ -199,13 +237,20 @@ class OpenAILLM(BaseLLM):
         if tools and LLMCapability.TOOLS in self.capabilities:
             body["tools"] = [tool.to_dict() for tool in tools]
 
+        # Provider-native tool dicts are passed through untouched.
+        extra_tools = list(self._options().native_tools) + list(native_tools or [])
+        if extra_tools:
+            body["tools"] = body.get("tools", []) + extra_tools
+
         if schema:
-            body["response_format"] = {"type": "json_object"}
+            body["response_format"] = build_response_format(schema, self._options().structured_output)
 
         if self.options:
-            body.update(self.options.model_dump(exclude_none=True))
-        
+            body.update(self.options.model_dump(exclude_none=True, exclude=NON_BODY_OPTIONS))
+
         if stream:
+            # Ask for a final usage chunk.
+            body["stream_options"] = {"include_usage": True}
             return self._stream_chat_response(body)
         else:
             return await self._get_direct_chat_response(body)
@@ -229,7 +274,8 @@ class OpenAILLM(BaseLLM):
                 role="assistant",
                 content=message_data.get("content"),
                 images=[],
-                tool_calls=tool_calls
+                tool_calls=tool_calls,
+                usage=Usage.from_openai(data.get("usage"))
             )
         except Exception as e:
             if self.logger:
@@ -238,23 +284,26 @@ class OpenAILLM(BaseLLM):
 
     async def _stream_chat_response(self, body: Dict) -> AsyncGenerator[Message, None]:
         tool_call_chunks = {}
+        usage = None
         try:
             stream_gen = await self.client.post("/chat/completions", json=body, stream=True, is_async=True)
+            buffer = ""
+            decoder = codecs.getincrementaldecoder("utf-8")()
             async for chunk in stream_gen:
-                lines = chunk.decode("utf-8").strip().split('\n')
-                for line in lines:
-                    line = line.strip()
-                    if not line.startswith("data: "):
-                        continue
-                    
-                    data_str = line[6:]
+                # Buffer so an SSE line (or a UTF-8 char) split across network chunks is not dropped.
+                buffer += decoder.decode(chunk)
+                payloads, buffer = iter_sse_data(buffer)
+                for data_str in payloads:
                     if data_str == "[DONE]":
                         break
                     
                     try:
                         data = json.loads(data_str)
-                    except:
+                    except Exception:
                         continue
+
+                    if data.get("usage"):
+                        usage = Usage.from_openai(data["usage"])
                     
                     if "choices" in data and data["choices"]:
                         choice = data["choices"][0]
@@ -284,61 +333,21 @@ class OpenAILLM(BaseLLM):
                     tc = tool_call_chunks[idx]
                     try:
                         args = json.loads(tc["arguments"])
-                    except:
+                    except Exception:
                         args = {}
                     tool_calls.append(ToolCall(id=tc["id"], name=tc["name"], arguments=args))
                 
-                yield Message(role="assistant", content=None, images=[], tool_calls=tool_calls)
+                yield Message(role="assistant", content=None, images=[], tool_calls=tool_calls, usage=usage)
+            elif usage:
+                # Usage-only final message (no content, no tool calls).
+                yield Message(role="assistant", content=None, images=[], tool_calls=[], usage=usage)
                                 
         except Exception as e:
             if self.logger:
                 self.logger.error(f"Streaming error: {str(e)}")
             raise RuntimeError(f"Streaming error: {str(e)}")
 
-    async def _check_tool_support(self) -> bool:
-        body = {
-            "model": self.model,
-            "messages": [{"role": "user", "content": "ping"}],
-            "max_tokens": 1,
-            "tools": [
-                {
-                    "type": "function",
-                    "function": {
-                        "name": "ping_tool",
-                        "description": "ping tool to check support",
-                        "parameters": {
-                            "type": "object",
-                            "properties": {
-                                "input": {"type": "string"}
-                            }
-                        }
-                    }
-                }
-            ]
-        }
-        try:
-            response = await self.client.post("/chat/completions", json=body, is_async=True)
-            if response.status_code == 200:
-                return True
-            if self.logger:
-                self.logger.debug(f"Tool check failed with status {response.status_code}: {response.text}")
-            return False
-        except Exception as e:
-            if self.logger:
-                self.logger.debug(f"Tool check exception: {str(e)}")
-            return False
-
-    async def info(self) -> LLMInfo:
-        has_tools = await self._check_tool_support()
-        capabilities = list(self.capabilities)
-        if has_tools:
-            if LLMCapability.TOOLS not in capabilities:
-                capabilities.append(LLMCapability.TOOLS)
-        else:
-            if LLMCapability.TOOLS in capabilities:
-                capabilities.remove(LLMCapability.TOOLS)
-        self.capabilities = capabilities
-
+    def info(self) -> LLMInfo:
         max_tokens = None
         if self.options and self.options.max_tokens:
             max_tokens = self.options.max_tokens
@@ -374,5 +383,5 @@ class OpenAILLM(BaseLLM):
     def __del__(self):
         try:
             self.client.close()
-        except:
+        except Exception:
             pass
