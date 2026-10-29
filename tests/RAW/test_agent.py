@@ -115,3 +115,57 @@ async def test_nested_arguments_reach_the_tool():
     await run(Agent(name="t", llm=llm, tools=[tool]), "go", stream=False)
 
     assert received["lines"] == lines
+
+
+def three_tool_script(ids):
+    return [
+        tool_call("add", {"x": 1, "y": 2}, id=ids[0]),
+        Message(role="assistant", tool_calls=[
+            ToolCall(id=ids[1], name="add", arguments={"x": 3}),
+            ToolCall(id=ids[2], name="add", arguments={"x": 4, "y": 5}),
+        ]),
+        Message(role="assistant", content="all done"),
+    ]
+
+
+@pytest.mark.parametrize("stream", [False, True])
+@pytest.mark.parametrize("async_hook", [False, True])
+async def test_on_message_reload_is_identical(stream, async_hook):
+    import json
+
+    saved = []
+
+    def save(message):
+        saved.append(json.dumps(message.to_dict()))
+
+    async def save_async(message):
+        save(message)
+
+    agent = Agent(
+        name="t", llm=FakeLLM(three_tool_script(["a", "b", "c"])), tools=[add_tool()],
+        on_message=save_async if async_hook else save,
+    )
+    await run(agent, "add some numbers", stream)
+
+    # Everything after the system prompt, in loop order.
+    original = [json.dumps(m.to_dict()) for m in agent.messages[1:]]
+    assert saved == original
+    assert [json.loads(s)["role"] for s in saved] == ["user", "assistant", "tool", "assistant", "tool", "tool", "assistant"]
+
+    # A resumed agent sends the model exactly the same history.
+    reloaded = [Message.from_dict(json.loads(s)) for s in saved]
+    llm = FakeLLM([Message(role="assistant", content="again")])
+    resumed = Agent(name="t", llm=llm, tools=[add_tool()], history=reloaded)
+    await run(resumed, "next", stream)
+    assert [json.dumps(m.to_dict()) for m in llm.calls[0][1:-1]] == original
+
+
+@pytest.mark.parametrize("stream", [False, True])
+async def test_tool_calls_without_ids_get_matching_ids(stream):
+    agent = Agent(name="t", llm=FakeLLM(three_tool_script(["", None, ""])), tools=[add_tool()])
+    await run(agent, "add", stream)
+
+    call_ids = [tc.id for m in agent.messages if m.role == "assistant" for tc in m.tool_calls]
+    result_ids = [m.tool_call_id for m in tool_messages(agent.messages)]
+    assert all(call_ids) and len(set(call_ids)) == 3
+    assert result_ids == call_ids

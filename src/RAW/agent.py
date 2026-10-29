@@ -1,27 +1,33 @@
-from typing import List, Optional, AsyncGenerator, Union, Dict, Any
+from typing import List, Optional, AsyncGenerator, Union, Dict, Any, Callable, Awaitable
 from RAW.models import Tool, ToolCall, LLMCapability, Message, File, FileType, Image, Skill
 from RAW.llms.base import BaseLLM
 from RAW.utils import Logger, Router
 import inspect
+import uuid
 import jsonschema as js_lib
 
 class Agent:
     def __init__(
             self,
-            name: str, 
-            base_prompt: str = "", 
-            tools: List[Tool] = [], 
+            name: str,
+            base_prompt: str = "",
+            tools: List[Tool] = [],
             llm: BaseLLM = None,
             logger: Optional[Logger] = None,
             history: List[Message] = [],
             router: Optional[Router] = None,
-            skills: List[Skill] = []
+            skills: List[Skill] = [],
+            on_message: Optional[Callable[[Message], Union[None, Awaitable[None]]]] = None,
         ):
         self.logger = logger or Logger(service_name=f"Agent:{name}")
         self.name = name
         self.logger.info(f"Initializing agent: {name}")
         self.llm = llm
         self.router = router
+        # Called (sync or async) with every message added to the conversation,
+        # in order, so callers can persist history exactly as the loop built it.
+        # Errors raised by the hook propagate to the caller.
+        self.on_message = on_message
         
         if not self.llm:
             raise ValueError("Agent must be initialized with an LLM.")
@@ -87,7 +93,7 @@ class Agent:
             user_message = Message(role="user", content=user_message)
         else:
             user_message = Message(role="user", content=user_message, images=user_images)
-        self.messages.append(user_message)
+        await self._append(user_message)
 
         if skill is not None:
             self.available_skills = [skill]
@@ -182,7 +188,7 @@ class Agent:
                 if accumulated_content:
                     complete_message.content = accumulated_content
 
-                self.messages.append(complete_message)
+                await self._append(complete_message)
                 self.logger.info(
                     f"{self.name}: {complete_message.content}"
                 )
@@ -198,7 +204,7 @@ class Agent:
                     tool_calls=[],
                     images=[]
                 )
-                self.messages.append(complete_message)
+                await self._append(complete_message)
                 self.logger.info(
                     f"{self.name}: {complete_message.content}"
                 )
@@ -211,7 +217,7 @@ class Agent:
     async def execute_no_stream(self) -> AsyncGenerator[Union[Message, Dict[str, Any]], None]:
         while True:
             response: Message = await self.llm.chat(messages=self.messages, schema=None, stream=False, tools=self.available_tools)
-            self.messages.append(response)
+            await self._append(response)
             self.logger.debug(
                 f"Agent {self.name} generated response: {response.content}"
             )
@@ -230,6 +236,18 @@ class Agent:
             # If no tool calls and no content, break loop
             self.logger.warning(f"Agent {self.name} received empty response from LLM. Stopping.")
             return
+
+    async def _append(self, message: Message) -> None:
+        # Tool results reference their call by id, and streamed tool calls can
+        # arrive without one, so every call gets an id before it is stored.
+        for tool_call in message.tool_calls:
+            if not tool_call.id:
+                tool_call.id = f"call_{uuid.uuid4().hex[:24]}"
+        self.messages.append(message)
+        if self.on_message is not None:
+            result = self.on_message(message)
+            if inspect.isawaitable(result):
+                await result
 
     async def _run_tool_calls(self, tool_calls: List[ToolCall]) -> AsyncGenerator[Dict[str, Any], None]:
         """
@@ -274,7 +292,7 @@ class Agent:
                 content=content,
                 tool_call_id=tool_call.id
             )
-            self.messages.append(tool_message)
+            await self._append(tool_message)
             yield {"tool_response": tool_message.content}
 
     def _check_tool_call(self, tool: Optional[Tool], tool_call: ToolCall) -> Optional[str]:
