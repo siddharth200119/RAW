@@ -1,15 +1,14 @@
 from pydantic import BaseModel
-from typing import Dict, List, Optional, Union, Literal
+from typing import Any, Dict, List, Optional, Literal
 from .image import Image
 
 
 class ToolCall(BaseModel):
     id: Optional[str] = None
     name: str
-    arguments: Dict[
-        str,
-        Union[str, int, float, bool, None, List[Dict], List[str]]
-    ]
+    # Any JSON value: tool arguments carry nested objects and numeric lists
+    # (e.g. document header + item lines).
+    arguments: Dict[str, Any]
 
 
 class Message(BaseModel):
